@@ -1,0 +1,93 @@
+# Built and run on the VPS (185.2.103.152). nginx on the host terminates TLS for
+# app.banooridairy.pk and proxies to 127.0.0.1:3004.
+#
+# Port 3004 because 3000-3003 are already taken on that box by writerengine,
+# visionlytics, helpora-landing and helpora-app.
+#
+# Needs a `.env` next to this file (see DEPLOY.md). Compose reads it for both the
+# ${...} build args below and the containers' runtime env.
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # next build inlines NEXT_PUBLIC_* into the client bundle, so these have
+      # to be present at BUILD time, not just runtime.
+      args:
+        - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+        - NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+        - NEXT_PUBLIC_APP_NAME=${NEXT_PUBLIC_APP_NAME}
+        # Not secret and not inlined into the client bundle — it only reaches the
+        # runner stage's env, so a deploy can verify which commit is serving.
+        - GIT_SHA=${GIT_SHA:-unknown}
+    image: farm-web:latest
+    container_name: farm-web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3004:3000"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+    networks:
+      - farm
+
+  # One-off task runner, not a long-running service. The `web` image is a
+  # stripped standalone build with no prisma CLI in it, so migrations run from
+  # the builder stage instead.
+  #
+  #   docker compose run --rm migrate npx prisma migrate deploy
+  #
+  # Build it EXPLICITLY on every deploy — `docker compose build web migrate`.
+  # Building `web` warms the shared builder layers but never (re)tags
+  # farm-migrate:latest, and `run` reuses an existing tag instead of building,
+  # so a migrate image left over from an older commit keeps running stale code:
+  # a newly added scripts/*.ts is simply not in it and the run dies with
+  # ERR_MODULE_NOT_FOUND. The layers are cached either way, so naming it here
+  # costs nothing.
+  #
+  # profiles keeps it out of `docker compose up`.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    image: farm-migrate:latest
+    profiles: ["tools"]
+    env_file:
+      - .env
+    networks:
+      - farm
+
+  # WhatsApp worker — parked. Not in use yet, so it does not build or start
+  # during a normal deploy. To bring it up later:
+  #
+  #   docker compose --profile worker up -d --build worker
+  #
+  # SINGLE instance only: whatsapp-web.js takes a LocalAuth lock on its session
+  # directory, and the wa_auth volume is what saves you from re-scanning the QR
+  # on every redeploy.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: farm-worker:latest
+    container_name: farm-worker
+    profiles: ["worker"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - wa_auth:/app/.wwebjs_auth
+    # Chromium needs more than Docker's default 64MB of shared memory.
+    shm_size: "512mb"
+    networks:
+      - farm
+
+networks:
+  farm:
+    driver: bridge
+
+volumes:
+  wa_auth:

@@ -1,0 +1,135 @@
+name: Deploy to VPS
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Production does NOT cancel in progress: a half-applied deploy here is worse
+# than a slow one. Two overlapping runs would race on the same checkout and the
+# same migration lock, so a newer push waits its turn.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Add VPS to known hosts
+        timeout-minutes: 2
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      # ONE ssh, and nothing on stdin.
+      #
+      # The script is base64'd on the runner, so the heredoc never travels over
+      # the connection: `docker compose run` attaches stdin, and a script piped
+      # into `bash -s` gets the rest of itself eaten by the first migrate step.
+      # An earlier attempt used a separate "upload the script" step, which had no
+      # timeout and no keepalive — when that ssh stalled, the job hung and every
+      # later run queued behind it. Hence one step, -n, ServerAlive and a timeout
+      # on everything that touches the network.
+      #
+      # `next build` prints nothing for minutes while it compiles, and an idle TCP
+      # connection gets reaped in that silence; ServerAlive keeps traffic flowing
+      # and timeout-minutes is the backstop.
+      #
+      # NEXT_PUBLIC_* are not passed from here — compose reads them from the .env
+      # already on the VPS, so no app secret ever enters Actions.
+      - name: Deploy to VPS
+        timeout-minutes: 25
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          APP_DIR: ${{ secrets.APP_DIR }}
+          SHA: ${{ github.sha }}
+        run: |
+          SCRIPT=$(base64 -w0 <<'REMOTE'
+          set -euo pipefail
+          APP_DIR="$1"; SHA="$2"; BRANCH="$3"
+          COMPOSE="docker compose"
+          cd "$APP_DIR"
+
+          # Pin the checkout to the exact commit this run was triggered for.
+          #
+          # This used to be `git pull origin main`, which only fast-forwards
+          # whatever branch happens to be checked out. On a detached HEAD, or a
+          # branch not tracking origin, it exits 0 having changed nothing — so the
+          # build context is identical, every layer is a cache hit, `up -d` finds
+          # no new image, and the run goes green having shipped the previous
+          # build. Staging spent 5-6 Sep 2026 doing exactly that across five green
+          # runs. Resetting to an explicit SHA cannot no-op.
+          #
+          # -f discards local edits to tracked files; untracked files are left
+          # alone, so /opt/farm/.env survives. Never add `git clean` here.
+          echo "--- checkout was: $(git rev-parse HEAD) on $(git rev-parse --abbrev-ref HEAD)"
+          git fetch --prune origin
+          git checkout -f -B "$BRANCH" "$SHA"
+          test "$(git rev-parse HEAD)" = "$SHA"
+          echo "--- checkout pinned to $SHA"
+
+          # Baked into the runner stage so the container can be asked what it is.
+          export GIT_SHA="$SHA"
+
+          # Reclaim BEFORE building. The prune at the end only drops dangling
+          # images and never touches the build cache, which grows by a whole Next
+          # build every deploy. The df/free lines make the log say which resource
+          # ran out instead of leaving it to be guessed at.
+          df -Ph . | tail -1 | awk '{print "--- disk: "$4" free, "$5" used"}'
+          free -m | awk 'NR==2{print "--- memory: "$7" MB available"}' || true
+          docker builder prune -f --filter until=24h || true
+          docker image prune -f || true
+          df -Ph . | tail -1 | awk '{print "--- disk after prune: "$4" free, "$5" used"}'
+
+          # -T on every `run`: no TTY, and stdin stays detached.
+          $COMPOSE build web migrate
+          $COMPOSE run --rm -T migrate npx prisma migrate deploy
+          $COMPOSE run --rm -T migrate npx tsx scripts/apply-rider-rls.ts
+          $COMPOSE run --rm -T migrate npx tsx scripts/apply-returns-sync-trigger.ts
+          $COMPOSE run --rm -T migrate npx tsx scripts/apply-audit-log.ts
+          $COMPOSE up -d --remove-orphans
+          docker image prune -f
+          $COMPOSE ps
+
+          # Ask the container that is actually serving which commit it was built
+          # from. A deploy that quietly reused an old image fails here rather than
+          # reporting success.
+          RUNNING=""
+          for _ in $(seq 1 12); do
+            RUNNING="$($COMPOSE exec -T web printenv GIT_SHA 2>/dev/null | tr -d '\r\n' || true)"
+            if [ -n "$RUNNING" ]; then break; fi
+            sleep 5
+          done
+          echo "--- serving commit: ${RUNNING:-<none>}"
+          if [ "$RUNNING" != "$SHA" ]; then
+            echo "DEPLOY DID NOT LAND: expected $SHA" >&2
+            exit 1
+          fi
+          REMOTE
+          )
+          ssh -n -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+            -o ConnectTimeout=30 -o BatchMode=yes \
+            "$VPS_USER@$VPS_HOST" \
+            "echo '$SCRIPT' | base64 -d > /tmp/farm-deploy-prod.sh && bash /tmp/farm-deploy-prod.sh '$APP_DIR' '$SHA' main"
+
+      # /api/health does a real DB round-trip, so a pass means "can actually
+      # serve", not just "process is up".
+      - name: Verify deployment
+        timeout-minutes: 3
+        run: |
+          for i in $(seq 1 24); do
+            if curl -fsS --max-time 10 -o /dev/null "${{ secrets.APP_URL }}/api/health"; then
+              echo "Up after $((i * 5))s"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "App did not come back within 2 minutes"
+          exit 1

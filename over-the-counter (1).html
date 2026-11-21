@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Over the Counter — Banoori Dairy</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:            #16241d;
+    --ink-soft:       #4a5c52;
+    --ink-faint:      #8b9a91;
+    --paper:          #faf8f3;
+    --paper-raised:   #ffffff;
+    --rule:           #e3ded1;
+    --rule-strong:    #c3bda9;
+    --forest:         #1f5c3d;
+    --forest-deep:    #17492f;
+    --forest-wash:    #eef3ee;
+    --clay:           #9c4a2f;
+    --amber:          #b8862b;
+    --slate:          #4b6b80;
+
+    --sp: 8px;
+    --radius: 3px;
+  }
+
+  *{ box-sizing:border-box; margin:0; padding:0; }
+
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family:'Manrope', system-ui, sans-serif;
+    font-size:14px;
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+    padding:calc(var(--sp)*4) calc(var(--sp)*2);
+  }
+
+  .sheet{
+    max-width:1180px;
+    margin:0 auto;
+    background:var(--paper-raised);
+    border:1px solid var(--rule);
+    border-radius:var(--radius);
+    box-shadow:0 1px 2px rgba(22,36,29,.04), 0 12px 32px -20px rgba(22,36,29,.25);
+  }
+
+  /* ---------- Masthead ---------- */
+  .masthead{
+    padding:calc(var(--sp)*4) calc(var(--sp)*4) calc(var(--sp)*2);
+    border-bottom:1px solid var(--rule);
+  }
+  .entity{
+    font-family:'JetBrains Mono', monospace;
+    font-size:10px;
+    letter-spacing:.14em;
+    text-transform:uppercase;
+    color:var(--forest);
+    font-weight:700;
+    margin-bottom:6px;
+  }
+  h1{
+    font-family:'Fraunces', serif;
+    font-size:32px;
+    font-weight:600;
+    letter-spacing:-.015em;
+    line-height:1.05;
+  }
+
+  /* ---------- Sub-tabs ---------- */
+  .tabs{
+    display:flex;
+    gap:calc(var(--sp)*3);
+    padding:0 calc(var(--sp)*4);
+    border-bottom:2px solid var(--ink);
+  }
+  .tab{
+    appearance:none; background:none; border:0;
+    border-bottom:2px solid transparent;
+    margin-bottom:-2px;
+    padding:12px 2px;
+    font-family:'JetBrains Mono', monospace;
+    font-size:11px;
+    letter-spacing:.13em;
+    text-transform:uppercase;
+    font-weight:700;
+    color:var(--ink-faint);
+    cursor:pointer;
+    transition:color .12s, border-color .12s;
+  }
+  .tab:hover{ color:var(--ink-soft); }
+  .tab[aria-selected="true"]{ color:var(--ink); border-bottom-color:var(--forest); }
+  .tab:focus-visible{ outline:2px solid var(--forest); outline-offset:2px; }
+
+  .panel{ padding:calc(var(--sp)*4); }
+  .panel[hidden]{ display:none; }
+
+  /* ---------- Form ---------- */
+  .form-grid{
+    display:grid;
+    grid-template-columns:repeat(2, minmax(0,1fr));
+    gap:calc(var(--sp)*2) calc(var(--sp)*6);
+    margin-bottom:calc(var(--sp)*4);
+  }
+  .col{ display:flex; flex-direction:column; gap:var(--sp); }
+
+  .field{ display:grid; grid-template-columns:130px 1fr; align-items:center; gap:var(--sp); }
+  .field.tall{ align-items:start; }
+  .field[hidden]{ display:none; }
+  .field label{
+    font-family:'JetBrains Mono', monospace;
+    font-size:9px;
+    letter-spacing:.12em;
+    text-transform:uppercase;
+    color:var(--ink-faint);
+    text-align:right;
+    padding-top:1px;
+  }
+  .field.tall label{ padding-top:9px; }
+
+  input[type=text], input[type=date], select, textarea{
+    width:100%;
+    font-family:'Manrope', sans-serif;
+    font-size:14px;
+    color:var(--ink);
+    background:#fff;
+    border:1px solid var(--rule-strong);
+    border-radius:var(--radius);
+    padding:7px 10px;
+    transition:border-color .12s, box-shadow .12s;
+  }
+  textarea{ resize:vertical; min-height:110px; line-height:1.45; }
+  input:focus, select:focus, textarea:focus{
+    outline:none;
+    border-color:var(--forest);
+    box-shadow:0 0 0 3px rgba(31,92,61,.09);
+  }
+  input::placeholder{ color:#bfc7c1; }
+  select{ cursor:pointer; }
+  input[readonly]{ background:var(--paper); color:var(--ink-soft); cursor:default; }
+  input[readonly]:focus{ border-color:var(--rule-strong); box-shadow:none; }
+
+  /* Segmented control — customer type */
+  .seg{ display:flex; border:1px solid var(--rule-strong); border-radius:var(--radius); overflow:hidden; }
+  .seg button{
+    flex:1;
+    appearance:none; background:#fff; border:0;
+    border-right:1px solid var(--rule);
+    padding:8px 6px;
+    font-family:'JetBrains Mono', monospace;
+    font-size:10px;
+    letter-spacing:.09em;
+    text-transform:uppercase;
+    font-weight:700;
+    color:var(--ink-faint);
+    cursor:pointer;
+    transition:background .12s, color .12s;
+  }
+  .seg button:last-child{ border-right:0; }
+  .seg button:hover{ background:var(--paper); color:var(--ink-soft); }
+  .seg button[aria-pressed="true"]{ background:var(--forest); color:#fff; }
+  .seg button:focus-visible{ outline:2px solid var(--forest); outline-offset:-2px; }
+
+  /* ---------- Stock panel ---------- */
+  .stock{ border:1px solid var(--rule); border-radius:var(--radius); overflow:hidden; }
+  .stock-head{
+    display:flex; justify-content:space-between; align-items:center; gap:var(--sp);
+    padding:12px calc(var(--sp)*2);
+    background:var(--forest-wash);
+    border-bottom:1px solid var(--rule);
+  }
+  .stock-head h2{
+    font-family:'JetBrains Mono', monospace;
+    font-size:10px; letter-spacing:.13em; text-transform:uppercase;
+    font-weight:700; color:var(--forest);
+  }
+
+  table{ width:100%; border-collapse:collapse; }
+  th{
+    font-family:'JetBrains Mono', monospace;
+    font-size:9px; letter-spacing:.12em; text-transform:uppercase;
+    font-weight:500; color:var(--ink-faint);
+    text-align:left;
+    padding:10px calc(var(--sp)*1.5);
+    border-bottom:1px solid var(--rule);
+    white-space:nowrap;
+  }
+  th.r{ text-align:right; }
+  td{ padding:6px calc(var(--sp)*1.5); border-bottom:1px solid #f2efe6; vertical-align:middle; }
+  tbody tr:hover td{ background:#fcfbf7; }
+
+  .col-unit{ width:120px; } .col-rate{ width:140px; }
+  .col-qty{ width:120px; }  .col-total{ width:150px; } .col-x{ width:44px; }
+
+  .num-in{
+    font-family:'JetBrains Mono', monospace;
+    font-size:13px; font-variant-numeric:tabular-nums; text-align:right;
+  }
+  .line-total{
+    display:block;
+    font-family:'JetBrains Mono', monospace;
+    font-size:13px; font-weight:600; font-variant-numeric:tabular-nums;
+    text-align:right; padding:7px 10px;
+  }
+
+  .kill{
+    appearance:none; background:none;
+    border:1px solid transparent; border-radius:var(--radius);
+    width:26px; height:26px; line-height:1; font-size:15px;
+    color:var(--ink-faint); cursor:pointer;
+    transition:color .12s, background .12s, border-color .12s;
+  }
+  .kill:hover{ color:var(--clay); background:#fdf3f0; border-color:#f0d9d1; }
+  .kill:disabled{ opacity:.25; cursor:not-allowed; }
+  .kill:focus-visible{ outline:2px solid var(--forest); outline-offset:1px; }
+
+  tfoot td{
+    border-top:1px solid var(--rule-strong); border-bottom:0;
+    padding:12px calc(var(--sp)*1.5);
+    background:var(--paper);
+  }
+  .grand-label{
+    font-family:'JetBrains Mono', monospace;
+    font-size:10px; letter-spacing:.13em; text-transform:uppercase;
+    font-weight:700; text-align:right;
+  }
+  .grand{
+    display:block;
+    font-family:'JetBrains Mono', monospace;
+    font-size:17px; font-weight:700; font-variant-numeric:tabular-nums;
+    text-align:right; padding-right:10px;
+  }
+
+  /* ---------- Buttons ---------- */
+  .btn{
+    font-family:'Manrope', sans-serif;
+    font-size:13px; font-weight:600;
+    color:var(--ink); background:#fff;
+    border:1px solid var(--rule-strong); border-radius:var(--radius);
+    padding:7px 13px; cursor:pointer;
+    transition:border-color .12s, background .12s, color .12s;
+  }
+  .btn:hover{ border-color:var(--forest); color:var(--forest); }
+  .btn:focus-visible{ outline:2px solid var(--forest); outline-offset:1px; }
+  .btn-primary{ background:var(--forest); color:#fff; border-color:var(--forest); }
+  .btn-primary:hover{ background:var(--forest-deep); border-color:var(--forest-deep); color:#fff; }
+  .btn-sm{ font-size:12px; padding:5px 10px; }
+
+  .actions{
+    display:flex; justify-content:space-between; align-items:center; gap:var(--sp);
+    margin-top:calc(var(--sp)*3);
+    padding-top:calc(var(--sp)*2);
+    border-top:1px solid var(--rule);
+    flex-wrap:wrap;
+  }
+  .hint{ font-size:12px; color:var(--ink-faint); }
+  .hint kbd{
+    font-family:'JetBrains Mono', monospace;
+    font-size:10px; background:var(--paper);
+    border:1px solid var(--rule); border-bottom-width:2px; border-radius:3px;
+    padding:1px 5px; color:var(--ink-soft);
+  }
+  .action-btns{ display:flex; gap:var(--sp); }
+
+  /* ---------- History ledger ---------- */
+  .ledger{
+    margin-top:calc(var(--sp)*5);
+    border:1px solid var(--rule); border-radius:var(--radius);
+    overflow:hidden;
+  }
+  .ledger-head{
+    display:flex; justify-content:space-between; align-items:baseline; gap:var(--sp);
+    padding:12px calc(var(--sp)*2);
+    background:var(--paper);
+    border-bottom:1px solid var(--rule);
+  }
+  .ledger-head h2{
+    font-family:'JetBrains Mono', monospace;
+    font-size:10px; letter-spacing:.13em; text-transform:uppercase;
+    font-weight:700; color:var(--ink);
+  }
+  .ledger-head .meta{
+    font-family:'JetBrains Mono', monospace;
+    font-size:11px; color:var(--ink-faint); font-variant-numeric:tabular-nums;
+  }
+  .ledger td{ padding:10px calc(var(--sp)*1.5); }
+  .ledger .inv{
+    font-family:'JetBrains Mono', monospace;
+    font-size:12px; font-weight:700; color:var(--forest);
+  }
+  .ledger .date, .ledger .items{
+    font-family:'JetBrains Mono', monospace;
+    font-size:12px; font-variant-numeric:tabular-nums; color:var(--ink-soft);
+  }
+  .ledger .amt{
+    font-family:'JetBrains Mono', monospace;
+    font-size:13px; font-weight:700; font-variant-numeric:tabular-nums; text-align:right;
+  }
+  .ledger tr.fresh td{ animation:flash 1.4s ease-out; }
+  @keyframes flash{ from{ background:#dff0e4; } to{ background:transparent; } }
+  .ledger .empty td{
+    padding:calc(var(--sp)*5); text-align:center;
+    color:var(--ink-faint); font-size:13px;
+  }
+
+  /* Customer-type tag */
+  .tag{
+    display:inline-block;
+    font-family:'JetBrains Mono', monospace;
+    font-size:9px; letter-spacing:.1em; text-transform:uppercase; font-weight:700;
+    padding:2px 7px; border-radius:10px;
+    border:1px solid currentColor;
+    margin-right:7px;
+    vertical-align:1px;
+  }
+  .tag--cash   { color:var(--amber); }
+  .tag--regular{ color:var(--forest); }
+  .tag--vendor { color:var(--slate); }
+
+  /* ---------- Invoice modal ---------- */
+  .overlay{
+    position:fixed; inset:0;
+    background:rgba(22,36,29,.45);
+    display:flex; align-items:flex-start; justify-content:center;
+    padding:calc(var(--sp)*5) var(--sp);
+    overflow-y:auto; z-index:50;
+  }
+  .overlay[hidden]{ display:none; }
+
+  .invoice-wrap{ width:100%; max-width:660px; }
+  .invoice{
+    background:#fff;
+    border:1px solid var(--rule); border-radius:var(--radius);
+    padding:calc(var(--sp)*5);
+    box-shadow:0 24px 60px -20px rgba(22,36,29,.5);
+  }
+  .inv-top{
+    display:flex; justify-content:space-between; align-items:flex-start;
+    gap:calc(var(--sp)*2);
+    padding-bottom:calc(var(--sp)*2);
+    border-bottom:2px solid var(--ink);
+    margin-bottom:calc(var(--sp)*3);
+    flex-wrap:wrap;
+  }
+  .inv-top h2{
+    font-family:'Fraunces', serif;
+    font-size:26px; font-weight:600; letter-spacing:-.015em;
+  }
+  .inv-no{
+    font-family:'JetBrains Mono', monospace;
+    font-size:14px; font-weight:700; color:var(--forest); text-align:right;
+  }
+  .inv-no small{
+    display:block; font-size:9px; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--ink-faint); font-weight:500; margin-bottom:3px;
+  }
+  .inv-meta{
+    display:grid; grid-template-columns:repeat(auto-fit, minmax(150px,1fr));
+    gap:var(--sp) calc(var(--sp)*3);
+    margin-bottom:calc(var(--sp)*3);
+  }
+  .inv-meta dt{
+    font-family:'JetBrains Mono', monospace;
+    font-size:9px; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--ink-faint); margin-bottom:3px;
+  }
+  .inv-meta dd{ font-size:14px; font-weight:600; }
+
+  .invoice th{ padding:8px 0; }
+  .invoice td{ padding:8px 0; border-bottom:1px solid #f2efe6; }
+  .invoice tbody tr:hover td{ background:transparent; }
+  .invoice .r{ text-align:right; }
+  .invoice .mono{
+    font-family:'JetBrains Mono', monospace;
+    font-size:13px; font-variant-numeric:tabular-nums;
+  }
+  .invoice tfoot td{
+    background:var(--forest); color:#fff; border:0;
+    padding:13px calc(var(--sp)*1.5);
+  }
+  .invoice tfoot .lbl{
+    font-family:'JetBrains Mono', monospace;
+    font-size:10px; letter-spacing:.13em; text-transform:uppercase; font-weight:700;
+  }
+  .invoice tfoot .sum{
+    font-family:'JetBrains Mono', monospace;
+    font-size:17px; font-weight:700; font-variant-numeric:tabular-nums; text-align:right;
+  }
+  .inv-note{
+    margin-top:calc(var(--sp)*2);
+    font-size:12px; color:var(--ink-faint); line-height:1.6;
+  }
+  .inv-note strong{ color:var(--ink-soft); }
+
+  .invoice-actions{ display:flex; justify-content:flex-end; gap:var(--sp); margin-top:calc(var(--sp)*2); }
+
+  /* ---------- Toast ---------- */
+  .toast{
+    position:fixed; right:20px; bottom:20px;
+    background:var(--ink); color:#fff;
+    font-size:13px; font-weight:600;
+    padding:11px 16px; border-radius:var(--radius);
+    box-shadow:0 8px 24px -8px rgba(22,36,29,.5);
+    transform:translateY(12px); opacity:0; pointer-events:none;
+    transition:opacity .18s, transform .18s;
+    z-index:60;
+  }
+  .toast.show{ opacity:1; transform:translateY(0); }
+
+  @media (max-width:900px){
+    .form-grid{ grid-template-columns:1fr; }
+    .stock, .ledger{ overflow-x:auto; }
+    .stock table{ min-width:760px; }
+    .ledger table{ min-width:640px; }
+    textarea{ min-height:70px; }
+  }
+  @media (max-width:640px){
+    body{ padding:var(--sp); }
+    .masthead, .panel{ padding:calc(var(--sp)*2); }
+    .tabs{ padding:0 calc(var(--sp)*2); }
+    h1{ font-size:24px; }
+    .field{ grid-template-columns:1fr; }
+    .field label{ text-align:left; }
+    .overlay{ padding:var(--sp); }
+    .invoice{ padding:calc(var(--sp)*3); }
+  }
+
+  @media print{
+    body{ padding:0; background:#fff; }
+    body > .sheet, body > .toast{ display:none !important; }
+    .overlay{ position:static; inset:auto; background:none; padding:0; display:block; overflow:visible; }
+    .invoice-wrap{ max-width:none; }
+    .invoice{ border:0; box-shadow:none; padding:0; }
+    .invoice-actions{ display:none; }
+    .invoice tfoot td{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  }
+
+  @media (prefers-reduced-motion:reduce){ *{ transition:none !important; animation:none !important; } }
+</style>
+</head>
+<body>
+
+<div class="sheet">
+
+  <header class="masthead">
+    <div class="entity">Banoori Dairy &nbsp;·&nbsp; Counter Ledger</div>
+    <h1>Over the Counter</h1>
+  </header>
+
+  <div class="tabs" role="tablist" aria-label="Over the counter">
+    <button class="tab" id="tab-purchase" role="tab" aria-selected="true"  aria-controls="panel-purchase">Purchases</button>
+    <button class="tab" id="tab-sale"     role="tab" aria-selected="false" aria-controls="panel-sale">Sale</button>
+  </div>
+
+  <section class="panel" id="panel-purchase" role="tabpanel" aria-labelledby="tab-purchase"></section>
+  <section class="panel" id="panel-sale"     role="tabpanel" aria-labelledby="tab-sale" hidden></section>
+
+</div>
+
+<div class="overlay" id="overlay" hidden>
+  <div class="invoice-wrap">
+    <div class="invoice" id="invoice" role="dialog" aria-modal="true" aria-labelledby="invTitle"></div>
+    <div class="invoice-actions">
+      <button class="btn" id="closeInv">Close</button>
+      <button class="btn btn-primary" id="printInv">Print Invoice</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ================= Master data ================= */
+
+  const PRODUCTS = [
+    { name:'Buffalo Milk', unit:'L',  rate: 280  },
+    { name:'Cow Milk',     unit:'L',  rate: 220  },
+    { name:'Cream',        unit:'kg', rate: 0    },
+    { name:'Eggs',         unit:'pc', rate: 25   },
+    { name:'Ghee',         unit:'kg', rate: 3500 },
+    { name:'Mix Milk',     unit:'L',  rate: 250  },
+    { name:'Skim Milk',    unit:'L',  rate: 280  },
+    { name:'Yoghurt',      unit:'kg', rate: 260  },
+  ];
+
+  const VENDORS = [
+    'Banoori Dairy',
+    'Al-Barkat Feed Mills',
+    'Sindh Agro Supplies',
+    'Chaudhry Veterinary Store',
+    'Karachi Fuel Depot',
+  ];
+
+  const CUSTOMERS = [
+    'Ahmed Raza — Gulshan Route',
+    'Sana Malik — DHA Phase 6',
+    'Bilal Traders — Clifton',
+    'Hina Qureshi — North Nazimabad',
+    'Cafe Aroma — Zamzama',
+    'Green Grocers — Tariq Road',
+  ];
+
+  /* ================= Helpers ================= */
+
+  const parse = s => { const n = parseFloat(String(s).replace(/[^0-9.]/g, '')); return isNaN(n) ? 0 : n; };
+  const money = n => n.toLocaleString('en-US', { minimumFractionDigits:0, maximumFractionDigits:2 });
+  const esc   = s => String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+  const today = () => new Date().toISOString().slice(0, 10);
+
+  const fmtDate = iso => {
+    if (!iso) return '—';
+    const [y, m, d] = iso.split('-');
+    return d + '-' + m + '-' + y.slice(2);
+  };
+
+  function stamp(t) {
+    t.items.forEach(i => i.total = i.rate * i.qty);
+    t.grand_total = t.items.reduce((s, i) => s + i.total, 0);
+    return t;
+  }
+
+  const toastEl = document.getElementById('toast');
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => toastEl.classList.remove('show'), 2600);
+  }
+
+  /* ================= Invoice modal (shared) ================= */
+
+  const TAGS    = { cash:'Cash', regular:'Regular', vendor:'Vendor' };
+  const overlay = document.getElementById('overlay');
+  const invoice = document.getElementById('invoice');
+
+  const tagHtml = type => '<span class="tag tag--' + type + '">' + TAGS[type] + '</span>';
+
+  function partyBlock(t) {
+    if (t.kind === 'purchase') {
+      return '<div><dt>Vendor</dt><dd>' + esc(t.party || '—') + '</dd></div>';
+    }
+    return '<div><dt>Billed To</dt><dd>' + tagHtml(t.customer_type) +
+           esc(t.party || 'Walk-in') + '</dd></div>';
+  }
+
+  function openInvoice(t) {
+    invoice.innerHTML =
+      '<div class="inv-top">' +
+        '<div>' +
+          '<div class="entity">Banoori Dairy</div>' +
+          '<h2 id="invTitle">' + (t.kind === 'purchase' ? 'Purchase' : 'Sale') + ' Invoice</h2>' +
+        '</div>' +
+        '<div class="inv-no"><small>Invoice No</small>' + esc(t.invoice_no) + '</div>' +
+      '</div>' +
+
+      '<dl class="inv-meta">' +
+        '<div><dt>Date</dt><dd>' + fmtDate(t.txn_date) + '</dd></div>' +
+        partyBlock(t) +
+        '<div><dt>Items</dt><dd>' + t.items.length + '</dd></div>' +
+      '</dl>' +
+
+      '<table>' +
+        '<thead><tr>' +
+          '<th>Product</th><th>Unit</th>' +
+          '<th class="r">Rate</th><th class="r">Qty</th><th class="r">Total</th>' +
+        '</tr></thead>' +
+        '<tbody>' +
+          t.items.map(i =>
+            '<tr>' +
+              '<td>' + esc(i.product) + '</td>' +
+              '<td class="mono">' + esc(i.unit) + '</td>' +
+              '<td class="r mono">' + money(i.rate) + '</td>' +
+              '<td class="r mono">' + money(i.qty) + '</td>' +
+              '<td class="r mono"><strong>' + money(i.total) + '</strong></td>' +
+            '</tr>'
+          ).join('') +
+        '</tbody>' +
+        '<tfoot><tr>' +
+          '<td colspan="4" class="lbl">Grand Total (PKR)</td>' +
+          '<td class="sum">' + money(t.grand_total) + '</td>' +
+        '</tr></tfoot>' +
+      '</table>' +
+
+      (t.narration ? '<p class="inv-note"><strong>Narration:</strong> ' + esc(t.narration) + '</p>' : '');
+
+    overlay.hidden = false;
+    document.getElementById('closeInv').focus();
+  }
+
+  const closeInvoice = () => { overlay.hidden = true; };
+  document.getElementById('closeInv').addEventListener('click', closeInvoice);
+  document.getElementById('printInv').addEventListener('click', () => window.print());
+  overlay.addEventListener('mousedown', e => { if (e.target === overlay) closeInvoice(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !overlay.hidden) closeInvoice(); });
+
+  /* ================= Counter engine — drives both panels ================= */
+
+  function counter(cfg) {
+    const root   = document.getElementById(cfg.panelId);
+    const txns   = cfg.seed.map(stamp);
+    const isSale = cfg.kind === 'sale';
+
+    const productOpts = PRODUCTS.map(p => '<option value="' + p.name + '">' + p.name + '</option>').join('');
+    const opts = list => list.map(v => '<option>' + v + '</option>').join('');
+
+    /* ---- Markup ---- */
+    root.innerHTML =
+      '<div class="form-grid">' +
+        '<div class="col">' +
+          '<div class="field">' +
+            '<label for="' + cfg.kind + '-inv">Invoice No</label>' +
+            '<input type="text" id="' + cfg.kind + '-inv" class="f-inv">' +
+          '</div>' +
+          '<div class="field">' +
+            '<label for="' + cfg.kind + '-date">Transaction Date</label>' +
+            '<input type="date" id="' + cfg.kind + '-date" class="f-date">' +
+          '</div>' +
+
+          (isSale
+            ? '<div class="field">' +
+                '<label>Customer Type</label>' +
+                '<div class="seg" role="group" aria-label="Customer type">' +
+                  '<button type="button" class="seg-btn" data-type="cash"    aria-pressed="true">Cash</button>' +
+                  '<button type="button" class="seg-btn" data-type="regular" aria-pressed="false">Regular</button>' +
+                  '<button type="button" class="seg-btn" data-type="vendor"  aria-pressed="false">Vendor</button>' +
+                '</div>' +
+              '</div>' +
+              '<div class="field f-cash-field">' +
+                '<label for="sale-cash">Customer Name</label>' +
+                '<input type="text" id="sale-cash" class="f-cash" placeholder="Walk-in (optional)">' +
+              '</div>' +
+              '<div class="field f-party-field" hidden>' +
+                '<label for="sale-party" class="f-party-label">Customer</label>' +
+                '<select id="sale-party" class="f-party"></select>' +
+              '</div>'
+
+            : '<div class="field">' +
+                '<label for="purchase-party">Vendor</label>' +
+                '<select id="purchase-party" class="f-party">' +
+                  '<option value="">Select vendor…</option>' + opts(VENDORS) +
+                '</select>' +
+              '</div>'
+          ) +
+        '</div>' +
+
+        '<div class="col">' +
+          '<div class="field tall">' +
+            '<label for="' + cfg.kind + '-note">Narration</label>' +
+            '<textarea id="' + cfg.kind + '-note" class="f-note" placeholder="Optional note against this ' + cfg.kind + '"></textarea>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="stock">' +
+        '<div class="stock-head">' +
+          '<h2>Stock Information</h2>' +
+          '<button class="btn btn-sm f-add">+ &nbsp;Add more items</button>' +
+        '</div>' +
+        '<table>' +
+          '<thead><tr>' +
+            '<th>Select Product</th>' +
+            '<th class="col-unit">Unit</th>' +
+            '<th class="col-rate r">Rate</th>' +
+            '<th class="col-qty r">Qty</th>' +
+            '<th class="col-total r">Total</th>' +
+            '<th class="col-x"></th>' +
+          '</tr></thead>' +
+          '<tbody class="f-rows"></tbody>' +
+          '<tfoot><tr>' +
+            '<td colspan="4" class="grand-label">Total</td>' +
+            '<td><span class="grand f-grand">0</span></td>' +
+            '<td></td>' +
+          '</tr></tfoot>' +
+        '</table>' +
+      '</div>' +
+
+      '<div class="actions">' +
+        '<p class="hint">Unit and rate fill from the product; rate stays editable. Total is Rate × Qty. Press <kbd>Enter</kbd> on the last row to add another.</p>' +
+        '<div class="action-btns">' +
+          '<button class="btn f-reset">Reset</button>' +
+          '<button class="btn btn-primary f-save">Save Changes</button>' +
+        '</div>' +
+      '</div>' +
+
+      '<section class="ledger">' +
+        '<div class="ledger-head">' +
+          '<h2>' + (isSale ? 'Sale' : 'Purchase') + ' History</h2>' +
+          '<span class="meta f-meta">—</span>' +
+        '</div>' +
+        '<table>' +
+          '<thead><tr>' +
+            '<th style="width:120px">Invoice</th>' +
+            '<th style="width:110px">Date</th>' +
+            '<th>' + (isSale ? 'Customer' : 'Vendor') + '</th>' +
+            '<th style="width:70px">Items</th>' +
+            '<th class="r" style="width:130px">Amount</th>' +
+            '<th style="width:140px"></th>' +
+          '</tr></thead>' +
+          '<tbody class="f-ledger"></tbody>' +
+        '</table>' +
+      '</section>';
+
+    /* ---- Handles ---- */
+    const $ = s => root.querySelector(s);
+    const invEl   = $('.f-inv');
+    const dateEl  = $('.f-date');
+    const noteEl  = $('.f-note');
+    const partyEl = $('.f-party');
+    const cashEl  = isSale ? $('.f-cash') : null;
+    const rows    = $('.f-rows');
+    const grandEl = $('.f-grand');
+    const ledger  = $('.f-ledger');
+    const metaEl  = $('.f-meta');
+
+    let customerType = 'cash';
+
+    /* ---- Customer type (sale only) ---- */
+    if (isSale) {
+      const cashField  = $('.f-cash-field');
+      const partyField = $('.f-party-field');
+      const partyLabel = $('.f-party-label');
+
+      root.querySelectorAll('.seg-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          customerType = btn.dataset.type;
+          root.querySelectorAll('.seg-btn').forEach(b => b.setAttribute('aria-pressed', b === btn));
+
+          cashField.hidden  = customerType !== 'cash';
+          partyField.hidden = customerType === 'cash';
+
+          if (customerType !== 'cash') {
+            const regular = customerType === 'regular';
+            partyLabel.textContent = regular ? 'Customer' : 'Vendor';
+            partyEl.innerHTML =
+              '<option value="">Select ' + (regular ? 'customer' : 'vendor') + '…</option>' +
+              opts(regular ? CUSTOMERS : VENDORS);
+            partyEl.focus();
+          }
+        });
+      });
+    }
+
+    /* ---- Stock rows ---- */
+    function addRow() {
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td><select class="product"><option value="">Select product…</option>' + productOpts + '</select></td>' +
+        '<td><input type="text" class="unit" readonly placeholder="—" aria-label="Unit"></td>' +
+        '<td><input type="text" class="rate num-in" inputmode="decimal" placeholder="0" aria-label="Rate"></td>' +
+        '<td><input type="text" class="qty num-in"  inputmode="decimal" placeholder="0" aria-label="Quantity"></td>' +
+        '<td><span class="line-total">0</span></td>' +
+        '<td><button class="kill" type="button" aria-label="Remove item">&times;</button></td>';
+      rows.appendChild(tr);
+      sync();
+      return tr;
+    }
+
+    function sync() {
+      let grand = 0;
+      rows.querySelectorAll('tr').forEach(tr => {
+        const total = parse(tr.querySelector('.rate').value) * parse(tr.querySelector('.qty').value);
+        tr.querySelector('.line-total').textContent = money(total);
+        grand += total;
+      });
+      grandEl.textContent = money(grand);
+
+      const kills = rows.querySelectorAll('.kill');
+      kills.forEach(k => { k.disabled = kills.length === 1; });
+    }
+
+    rows.addEventListener('change', e => {
+      if (!e.target.classList.contains('product')) return;
+      const tr = e.target.closest('tr');
+      const p  = PRODUCTS.find(x => x.name === e.target.value);
+      tr.querySelector('.unit').value = p ? p.unit : '';
+      // Seed the list rate but leave it editable — counter rates get negotiated.
+      tr.querySelector('.rate').value = p && p.rate ? p.rate : '';
+      sync();
+    });
+
+    rows.addEventListener('input', e => {
+      if (e.target.classList.contains('rate') || e.target.classList.contains('qty')) sync();
+    });
+
+    rows.addEventListener('click', e => {
+      if (e.target.classList.contains('kill')) { e.target.closest('tr').remove(); sync(); }
+    });
+
+    rows.addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const tr = e.target.closest('tr');
+      if (tr === rows.lastElementChild) addRow().querySelector('.product').focus();
+      else tr.nextElementSibling.querySelector('.product').focus();
+    });
+
+    $('.f-add').addEventListener('click', () => addRow().querySelector('.product').focus());
+
+    /* ---- Invoice numbering ---- */
+    function nextNo() {
+      const max = txns.reduce((m, t) => {
+        const n = parseInt(String(t.invoice_no).replace(/\D/g, ''), 10);
+        return isNaN(n) ? m : Math.max(m, n);
+      }, 0);
+      return cfg.prefix + '-' + String(max + 1).padStart(4, '0');
+    }
+
+    /* ---- History ---- */
+    function renderLedger(fresh) {
+      if (!txns.length) {
+        ledger.innerHTML = '<tr class="empty"><td colspan="6">No ' + cfg.kind + 's recorded yet.</td></tr>';
+        metaEl.textContent = '—';
+        return;
+      }
+
+      ledger.innerHTML = txns.map(t => {
+        const party = isSale
+          ? tagHtml(t.customer_type) + esc(t.party || 'Walk-in')
+          : esc(t.party || '—');
+
+        return '<tr' + (t.invoice_no === fresh ? ' class="fresh"' : '') + '>' +
+          '<td class="inv">'   + esc(t.invoice_no) + '</td>' +
+          '<td class="date">'  + fmtDate(t.txn_date) + '</td>' +
+          '<td>'               + party + '</td>' +
+          '<td class="items">' + t.items.length + '</td>' +
+          '<td class="amt">'   + money(t.grand_total) + '</td>' +
+          '<td><button class="btn btn-sm" data-inv="' + esc(t.invoice_no) + '">View invoice</button></td>' +
+        '</tr>';
+      }).join('');
+
+      const total = txns.reduce((s, t) => s + t.grand_total, 0);
+      metaEl.textContent = txns.length + ' ' + cfg.kind + 's · Rs ' + money(total);
+    }
+
+    ledger.addEventListener('click', e => {
+      const btn = e.target.closest('[data-inv]');
+      if (!btn) return;
+      const t = txns.find(x => x.invoice_no === btn.dataset.inv);
+      if (t) openInvoice(t);
+    });
+
+    /* ---- Save ---- */
+    $('.f-save').addEventListener('click', () => {
+      const items = [...rows.querySelectorAll('tr')]
+        .map(tr => ({
+          product: tr.querySelector('.product').value,
+          unit:    tr.querySelector('.unit').value,
+          rate:    parse(tr.querySelector('.rate').value),
+          qty:     parse(tr.querySelector('.qty').value)
+        }))
+        .filter(i => i.product && i.qty > 0);
+
+      // A cash sale needs no counterparty on file; everything else does.
+      let party = '';
+      if (isSale && customerType === 'cash') {
+        party = cashEl.value.trim();
+      } else {
+        party = partyEl.value;
+        if (!party) {
+          const what = (!isSale || customerType === 'vendor') ? 'vendor' : 'customer';
+          return toast('Select a ' + what + ' first.');
+        }
+      }
+
+      if (!items.length) return toast('Add at least one item with a quantity.');
+
+      const typed = invEl.value.trim();
+      if (typed && txns.some(t => t.invoice_no === typed)) {
+        return toast('Invoice ' + typed + ' already exists.');
+      }
+
+      const txn = stamp({
+        kind:          cfg.kind,
+        invoice_no:    typed || nextNo(),
+        txn_date:      dateEl.value,
+        party:         party,
+        customer_type: isSale ? customerType : null,
+        narration:     noteEl.value.trim(),
+        items:         items
+      });
+
+      console.log('POST ' + cfg.endpoint, txn);   // ← wire to your endpoint
+
+      txns.unshift(txn);
+      renderLedger(txn.invoice_no);
+      openInvoice(txn);
+      clearForm();
+      toast(txn.invoice_no + ' saved · Rs ' + money(txn.grand_total));
+    });
+
+    /* ---- Reset ---- */
+    function clearForm() {
+      invEl.value  = '';
+      noteEl.value = '';
+      invEl.placeholder = nextNo() + ' (auto)';
+      partyEl.selectedIndex = 0;
+      if (cashEl) cashEl.value = '';
+      dateEl.value = today();
+      rows.innerHTML = '';
+      addRow();
+    }
+
+    $('.f-reset').addEventListener('click', clearForm);
+
+    /* ---- Boot ---- */
+    dateEl.value = today();
+    invEl.placeholder = nextNo() + ' (auto)';
+    addRow();
+    renderLedger();
+  }
+
+  /* ================= Panels ================= */
+
+  counter({
+    kind:'purchase', prefix:'PUR', panelId:'panel-purchase', endpoint:'/api/otc/purchase',
+    seed:[
+      { kind:'purchase', invoice_no:'PUR-0003', txn_date:'2026-07-09', party:'Sindh Agro Supplies',
+        narration:'Weekly dairy intake', items:[
+          { product:'Buffalo Milk', unit:'L', rate:280, qty:120 },
+          { product:'Cow Milk',     unit:'L', rate:220, qty:80  }]},
+      { kind:'purchase', invoice_no:'PUR-0002', txn_date:'2026-07-05', party:'Banoori Dairy',
+        narration:'Ghee and yoghurt restock', items:[
+          { product:'Ghee',    unit:'kg', rate:3500, qty:6  },
+          { product:'Yoghurt', unit:'kg', rate:260,  qty:25 }]},
+      { kind:'purchase', invoice_no:'PUR-0001', txn_date:'2026-07-01', party:'Chaudhry Veterinary Store',
+        narration:'', items:[
+          { product:'Eggs', unit:'pc', rate:25, qty:300 }]},
+    ]
+  });
+
+  counter({
+    kind:'sale', prefix:'SAL', panelId:'panel-sale', endpoint:'/api/otc/sale',
+    seed:[
+      { kind:'sale', invoice_no:'SAL-0003', txn_date:'2026-07-10', customer_type:'regular',
+        party:'Cafe Aroma — Zamzama', narration:'Standing daily order', items:[
+          { product:'Buffalo Milk', unit:'L',  rate:280, qty:40 },
+          { product:'Cream',        unit:'kg', rate:900, qty:3  }]},
+      { kind:'sale', invoice_no:'SAL-0002', txn_date:'2026-07-10', customer_type:'cash',
+        party:'', narration:'Counter walk-in', items:[
+          { product:'Yoghurt', unit:'kg', rate:260, qty:2  },
+          { product:'Eggs',    unit:'pc', rate:25,  qty:12 }]},
+      { kind:'sale', invoice_no:'SAL-0001', txn_date:'2026-07-08', customer_type:'vendor',
+        party:'Sindh Agro Supplies', narration:'Bulk skim milk offload', items:[
+          { product:'Skim Milk', unit:'L', rate:280, qty:200 }]},
+    ]
+  });
+
+  /* ================= Tabs ================= */
+
+  const tabs = [...document.querySelectorAll('.tab')];
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      tabs.forEach(t => {
+        const on = t === tab;
+        t.setAttribute('aria-selected', on);
+        document.getElementById(t.getAttribute('aria-controls')).hidden = !on;
+      });
+    });
+  });
+
+})();
+</script>
+
+</body>
+</html>

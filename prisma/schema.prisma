@@ -1,0 +1,2329 @@
+// Dairy Farm Management — Prisma schema
+// Models the full operational loop:
+//   Farm produces -> Distribution receives -> Riders deliver ->
+//   Customers owe -> Cash collected -> Heads managed -> Reports generated
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------- Auth & People ----------
+
+// Dashboard roles: ADMIN, MANAGER (full access) and the limited roles
+// DOCTOR / PACKAGING / VAN_DRIVER (one module each — see src/lib/access.ts).
+// RIDER is NOT a dashboard role: riders sign in to the MOBILE app only.
+// INVENTORY / ACCOUNTANT are legacy and unused (kept — dropping enum values is
+// destructive and buys nothing).
+enum Role {
+  ADMIN
+  MANAGER
+  DOCTOR
+  PACKAGING
+  // Runs the consignment shops: drops, follow-ups and what they owe. Sees the
+  // Retail Marts module and nothing else that writes.
+  RETAIL_MANAGER
+  // Staff with no other job in the software — cleaners, guards, helpers. They sign
+  // in, see the Checklists page and nothing else, and tick off their own list.
+  CHECKLIST
+  VAN_DRIVER
+  INVENTORY
+  RIDER
+  ACCOUNTANT
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  phone        String?
+  role         Role     @default(MANAGER)
+  passwordHash String?
+  supabaseId   String?  @unique
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  rider    Rider?
+  employee Employee?
+
+  ledgerEntries  LedgerEntry[]         @relation("EnteredBy")
+  payments       Payment[]             @relation("EnteredByPayment")
+  expenses       Expense[]             @relation("EnteredByExpense")
+  inventory      InventoryMovement[]   @relation("EnteredByInv")
+  notes          DailyNote[]           @relation("CreatedByNote")
+  otcSales       OtcSale[]             @relation("EnteredByOtcSale")
+  otcPurchases   OtcPurchase[]         @relation("EnteredByOtcPurchase")
+  checklists     Checklist[]           @relation("ChecklistAssignee")
+  checklistTicks ChecklistCompletion[] @relation("ChecklistTickedBy")
+  checklistNotes ChecklistNote[]       @relation("ChecklistNoteAuthor")
+
+  retailPlacements   RetailPlacement[]    @relation("EnteredByRetailPlacement")
+  retailVoids        RetailPlacement[]    @relation("VoidedByRetailPlacement")
+  retailResolutions  RetailResolution[]   @relation("EnteredByRetailResolution")
+  retailPayments     RetailPayment[]      @relation("EnteredByRetailPayment")
+  retailStockAdded   RetailStockEntry[]   @relation("EnteredByRetailStockEntry")
+  ownerFunding       OwnerContribution[]  @relation("EnteredByOwnerContribution")
+  checklistPenalties ChecklistPenalty[]   @relation("ChecklistPenaltyUser")
+  farmSales          FarmSale[]           @relation("EnteredByFarmSale")
+  retailStockVoided  RetailStockEntry[]   @relation("VoidedByRetailStockEntry")
+  complaintsEntered  CustomerComplaint[]  @relation("EnteredByComplaint")
+  routePlans         RoutePlan[]          @relation("UpdatedByRoutePlan")
+  returnReviews      RiderReturnReview[]  @relation("ReviewedByRiderReturn")
+  retailReturns      RetailReturnReview[] @relation("ReviewedByRetailReturn")
+}
+
+model Rider {
+  bottleReturns BottleReturn[]
+  id      String  @id @default(cuid())
+  userId  String  @unique
+  user    User    @relation(fields: [userId], references: [id])
+  vehicle String?
+  cnic    String?
+  active  Boolean @default(true)
+
+  shifts         Shift[]
+  routeStops     RouteStop[]
+  inventoryMoves InventoryMovement[]
+  customers      Customer[]
+  deliveries     DeliveryEntry[]
+  payments       Payment[] // cash this rider collected (see Payment.riderId)
+  riderExtras    RiderExtraItem[]
+  returnReviews  RiderReturnReview[]
+  lastLocation   RiderLocation?
+  track          RiderTrackPoint[]
+}
+
+model Employee {
+  id         String    @id @default(cuid())
+  userId     String?   @unique
+  user       User?     @relation(fields: [userId], references: [id])
+  name       String
+  role       String?
+  baseSalary Decimal   @default(0) @db.Decimal(12, 2)
+  dailyWage  Decimal?  @db.Decimal(10, 2)
+  joinedAt   DateTime  @default(now())
+  active     Boolean   @default(true)
+  /// The day they stopped working here, set when they are disabled and cleared if
+  /// they are taken back on. A month they worked part of is paid for that part:
+  /// wage workers for the days, fixed staff pro rata. Null means still working, or
+  /// disabled before this was recorded — either way, no known leaving date, and
+  /// their past months read exactly as they did.
+  leftAt     DateTime?
+  /// Which part of the business they work in: AGRICULTURE | RETAIL | FARM, or null
+  /// for not set yet. A plain string checked in src/lib/staff-category.ts, so a
+  /// new category needs no migration. Used to filter the Attendance page.
+  category   String?
+
+  attendance         Attendance[]
+  bonuses            Bonus[]
+  deductions         Deduction[]
+  salaryPayments     SalaryPayment[]
+  checklistPenalties ChecklistPenalty[]
+}
+
+// ---------- Catalog: Products / Areas / Shifts ----------
+
+enum ProductUnit {
+  LITER
+  KG
+  PIECE
+  // Sold as packs — a 250 ml bottle, a 500 g sachet. The quantity recorded is the
+  // NUMBER OF PACKS, and the price is per pack; Product.packSize holds the size.
+  // Offered only for retailOnly products, so no farm-stock figure ever sees one.
+  MILLILITER
+  GRAM
+}
+
+model Product {
+  id          String      @id @default(cuid())
+  name        String      @unique
+  unit        ProductUnit @default(LITER)
+  defaultRate Decimal     @default(0) @db.Decimal(10, 2)
+  active      Boolean     @default(true)
+  // Retail products — almond milk, lassi, the small bottles. Made and sold like
+  // anything else, but outside the milk pipeline: they do not come off a
+  // production run or through the dispatch chain, so they never appear on the
+  // production, packaging, reconciliation or dashboard-milk screens, and a pack
+  // count is not litres.
+  //
+  // Their stock IS tracked. It is counted in on the Retail Inventory page, and
+  // they can only be sold, dropped at a shop or put on a round while there is
+  // enough of them — the same guard every other product gets.
+  retailOnly  Boolean     @default(false)
+  // The size of ONE pack, in `unit`: 250 for a 250 ml bottle. Null for everything
+  // measured in L/kg/pc, where the idea does not apply.
+  packSize    Decimal?    @db.Decimal(10, 3)
+  // What ONE unit costs to make — one PACK for products sold in packs, matching
+  // defaultRate. Used only to value what we lose, never to price a sale.
+  // Nullable on purpose: "nobody has set this" must read as "—", not as a loss
+  // of zero, which would silently report every expiry as costing nothing.
+  costPrice   Decimal?    @db.Decimal(10, 2)
+  createdAt   DateTime    @default(now())
+
+  // Customer-app shop display (optional)
+  imageUrl     String?
+  category     String?
+  description  String?
+  deliveryTime String?
+
+  customerProducts   CustomerProduct[]
+  productionLogs     ProductionLog[]
+  inventoryMoves     InventoryMovement[]
+  routeStopItems     RouteStopItem[]
+  deliveries         DeliveryEntry[]
+  invoiceLines       InvoiceLine[]
+  sampleItems        SampleItem[]
+  customerOrderItems CustomerOrderItem[]
+  otcSaleLines       OtcSaleLine[]
+  otcPurchaseLines   OtcPurchaseLine[]
+  retailLines        RetailPlacementLine[]
+  riderExtras        RiderExtraItem[]
+  retailStockEntries RetailStockEntry[]
+  complaints         CustomerComplaint[]
+  returnLines        RiderReturnLine[]
+  retailReturnLines  RetailReturnLine[]
+
+  @@index([retailOnly])
+}
+
+model Area {
+  id                    String   @id @default(cuid())
+  name                  String   @unique
+  city                  String?
+  defaultDeliveryCharge Decimal  @default(0) @db.Decimal(10, 2)
+  // Delivery schedule (replaced the old weekday `deliveryDays Int[]`). All dates
+  // are plain "YYYY-MM-DD" strings so the route planner (which works in date
+  // strings) never has a timezone conversion. A shift delivers on a date if ANY
+  // of its areas does.
+  scheduleType          String   @default("DAILY") // DAILY | EVERY_N | CUSTOM
+  scheduleInterval      Int      @default(1) // N for EVERY_N (e.g. 2 = every 2nd day)
+  scheduleAnchor        String? // "YYYY-MM-DD" cycle start for EVERY_N
+  customDates           String[] @default([]) // "YYYY-MM-DD"[] delivery dates for CUSTOM
+  createdAt             DateTime @default(now())
+
+  customers Customer[]
+  shifts    Shift[]      @relation("ShiftAreas")
+  samples   SampleLead[]
+}
+
+enum ShiftType {
+  MORNING
+  EVENING
+  CUSTOM
+}
+
+model Shift {
+  id        String    @id @default(cuid())
+  name      String    @unique
+  type      ShiftType @default(MORNING)
+  startTime String?
+  riderId   String?
+  rider     Rider?    @relation(fields: [riderId], references: [id])
+  /// The PKT day (pktNoonToUTC) this shift switched from packets to glass bottles.
+  /// Null = still packets. From this day every litre of milk delivered on the shift
+  /// is a bottle the customer holds until the rider takes it back.
+  bottlesSince DateTime?
+
+  customers      Customer[]
+  routes         Route[]
+  routePlans     RoutePlan[]
+  productionLogs ProductionLog[]
+  areas          Area[]              @relation("ShiftAreas")
+  samples        SampleLead[]
+  riderExtras    RiderExtraItem[]
+  complaints     CustomerComplaint[]
+}
+
+// ---------- Customers ----------
+
+enum BillingType {
+  CREDIT
+  DAILY
+}
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+  RECOVERY
+  DISABLED
+  // Served only when they phone in. Deliberately NOT auto-added to any route:
+  // the route builder loads status=ACTIVE only, so an ON_CALL customer appears
+  // solely when a manager adds them to a day's shift from the route editor.
+  ON_CALL
+}
+
+enum ScheduleType {
+  DAILY
+  ALTERNATE
+  // Specific weekday(s) only — delivers on the chosen weekdays, on the days the
+  // shift actually runs. See CustomerProduct.weekdays.
+  WEEKLY
+}
+
+model Customer {
+  id           String  @id @default(cuid())
+  customerCode String  @unique
+  supabaseId   String? @unique // Supabase Auth uid — customer logs into the customer app
+  name         String
+  invoiceName  String?
+  phone        String
+  secondPhone  String?
+  email        String?
+  address      String?
+  locationUrl  String?
+
+  areaId  String?
+  area    Area?   @relation(fields: [areaId], references: [id])
+  shiftId String?
+  shift   Shift?  @relation(fields: [shiftId], references: [id])
+  riderId String?
+  rider   Rider?  @relation(fields: [riderId], references: [id])
+
+  billingType      BillingType    @default(CREDIT)
+  status           CustomerStatus @default(ACTIVE)
+  customerType     String?
+  deliverySequence Int? // delivery order within the shift/route
+
+  joinDate             DateTime @default(now())
+  openingBalance       Decimal  @default(0) @db.Decimal(12, 2)
+  creditLimit          Decimal  @default(0) @db.Decimal(12, 2)
+  deliveryCharge       Decimal  @default(0) @db.Decimal(10, 2)
+  deliveryInstructions String?
+  deactivationReason   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products      CustomerProduct[]
+  routeStops    RouteStop[]
+  deliveries    DeliveryEntry[]
+  payments      Payment[]
+  invoices      Invoice[]
+  ledgerEntries LedgerEntry[]
+  recoveryCases RecoveryCase[]
+  winbackCase   WinbackCase?
+  notes         DailyNote[]
+  sampleSource  SampleLead?            @relation("SampleConversion")
+  orders        CustomerOrder[]
+  calendarDays  CustomerCalendarDay[]
+  notifications CustomerNotification[]
+  paymentProofs PaymentProof[]
+  otcSales      OtcSale[]
+  complaints    CustomerComplaint[]
+  deviceTokens  DeviceToken[]
+
+  bottleReturns     BottleReturn[]
+  bottleAdjustments BottleAdjustment[]
+  pin               CustomerPin?
+
+  @@index([phone])
+  @@index([shiftId])
+  @@index([areaId])
+}
+
+// One row per product the customer subscribes to (multi-item support)
+model CustomerProduct {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id])
+
+  quantity    Decimal @db.Decimal(10, 3)
+  ratePerUnit Decimal @db.Decimal(10, 2)
+
+  scheduleType     ScheduleType @default(DAILY)
+  // Pattern of qty per day, looped from anchorDate.
+  // [2, 0, 3, 0]  -> day0=2, day1=0, day2=3, day3=0, day4=2...
+  alternatePattern Decimal[]    @default([])
+  // WEEKLY only: JS weekday numbers (0=Sun … 6=Sat) this product is delivered on.
+  // The shift's own schedule still applies — this narrows those days, it cannot
+  // add a delivery on a day the shift does not run.
+  weekdays         Int[]        @default([])
+  anchorDate       DateTime?
+
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@unique([customerId, productId])
+  @@index([customerId])
+}
+
+// ---------- Production / Inventory ----------
+
+enum InventoryMovementType {
+  PRODUCED
+  DISPATCHED
+  ARRIVED
+  HANDED_OVER
+  DELIVERED
+  RETURNED
+  WASTAGE
+  KITCHEN_USE
+  CALF_USE
+  REPLACEMENT
+  COUNTER_SALE // stock leaves via an Over-the-Counter sale
+  COUNTER_PURCHASE // stock arrives via an Over-the-Counter purchase
+}
+
+model ProductionLog {
+  id        String   @id @default(cuid())
+  date      DateTime @default(now())
+  shiftId   String?
+  shift     Shift?   @relation(fields: [shiftId], references: [id])
+  productId String
+  product   Product  @relation(fields: [productId], references: [id])
+  quantity  Decimal  @db.Decimal(12, 3)
+  notes     String?
+  createdAt DateTime @default(now())
+
+  @@index([date])
+  @@index([productId])
+}
+
+model InventoryMovement {
+  id          String                @id @default(cuid())
+  date        DateTime              @default(now())
+  type        InventoryMovementType
+  productId   String
+  product     Product               @relation(fields: [productId], references: [id])
+  quantity    Decimal               @db.Decimal(12, 3)
+  riderId     String?
+  rider       Rider?                @relation(fields: [riderId], references: [id])
+  reason      String?
+  reference   String?
+  stage       String? // set ONLY by manual Waste-entry rows ("Production" | "Packaging" | "Retail" | "Yoghurt"); null on every other movement
+  enteredById String?
+  enteredBy   User?                 @relation("EnteredByInv", fields: [enteredById], references: [id])
+  createdAt   DateTime              @default(now())
+
+  @@index([date])
+  @@index([type])
+  @@index([productId])
+}
+
+// Spare/extra stock a manager hands a rider for a shift (beyond the planned per-customer
+// load), for customers who ask for more on the spot. givenQty leaves in-storage immediately
+// (via the `extraOut` term in the on-hand formula); returnedQty (manager-confirmed) restores it.
+// The delivered portion (given − returned) is billed by the rider app as a DeliveryEntry.
+model RiderExtraItem {
+  id              String   @id @default(cuid())
+  date            DateTime // pktNoonToUTC(dateStr) — canonical PKT day key
+  shiftId         String
+  shift           Shift    @relation(fields: [shiftId], references: [id])
+  riderId         String?
+  rider           Rider?   @relation(fields: [riderId], references: [id])
+  productId       String
+  product         Product  @relation(fields: [productId], references: [id])
+  givenQty        Decimal  @db.Decimal(10, 3)
+  returnedQty     Decimal  @default(0) @db.Decimal(10, 3)
+  status          String   @default("OUT") // OUT (with rider) | RETURNED (manager-confirmed)
+  givenById       String?
+  confirmedById   String?
+  confirmedByName String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([date])
+  @@index([shiftId])
+  @@index([productId])
+}
+
+/// What the office decided about one shift's returns: how much of what came
+/// back is usable stock and how much was thrown away.
+///
+/// Returned does NOT mean usable. The rider app records what was handed back and
+/// that already counts as stock again; this review is what takes the spoiled part
+/// out of it. One review per shift per day, rewritten in place if it is reopened,
+/// and the wastage rows it wrote are rewritten with it so nothing is counted twice.
+/// One rider's day, received back in one go.
+///
+/// Spare stock is given to a RIDER, not to a shift, and he hands one lot back at
+/// the end of the day whichever rounds he ran. This used to be kept per shift,
+/// which meant guessing which of a rider's shifts an end-of-shift return belonged
+/// to — the app stamps the rider and the time on it, never the shift — and the
+/// same milk could be filed under a different shift depending on the clock.
+model RiderReturnReview {
+  id             String   @id @default(cuid())
+  /// pktNoonToUTC(dateStr) — the canonical PKT day key, as Route.date uses.
+  date           DateTime
+  riderId        String
+  rider          Rider    @relation(fields: [riderId], references: [id])
+  notes          String?
+  /// One dialog open = one token. A double submit writes one review, not two.
+  clientToken    String?  @unique
+  reviewedById   String?
+  reviewedBy     User?    @relation("ReviewedByRiderReturn", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedByName String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  lines RiderReturnLine[]
+
+  @@unique([date, riderId])
+  @@index([date])
+}
+
+/// One product on a return review: what came back, how much of it is stock, and
+/// how much was wasted. `stockQty + wasteQty` always equals `returnedQty`.
+model RiderReturnLine {
+  id          String            @id @default(cuid())
+  reviewId    String
+  review      RiderReturnReview @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product           @relation(fields: [productId], references: [id])
+  /// "APP" = an end-of-shift return the rider app recorded.
+  /// "EXTRA" = spare stock given to the rider, received back here.
+  source      String
+  /// The RiderExtraItem this line receives back, for an EXTRA line.
+  extraItemId String?
+  returnedQty Decimal           @db.Decimal(10, 3)
+  stockQty    Decimal           @db.Decimal(10, 3)
+  wasteQty    Decimal           @db.Decimal(10, 3)
+  /// Part of returnedQty the reviewer never received: the app said it came
+  /// back, it did not. Written off as missing, not wastage (src/lib/missing.ts).
+  missingQty  Decimal           @default(0) @db.Decimal(10, 3)
+  wasteReason String?
+
+  @@index([reviewId])
+  @@index([productId])
+}
+
+/// What the retail distribution centre had left at the end of a day.
+///
+/// Packaging sends it a day's load; the riders take their shifts' share from it.
+/// Whatever is still there afterwards comes back — this is the office deciding
+/// how much of it is usable stock and how much was thrown away. One per day,
+/// rewritten in place if it is reopened.
+model RetailReturnReview {
+  id             String   @id @default(cuid())
+  /// pktNoonToUTC(dateStr) — the canonical PKT day key.
+  date           DateTime @unique
+  notes          String?
+  /// One dialog open = one token. A double submit writes one review, not two.
+  clientToken    String?  @unique
+  reviewedById   String?
+  reviewedBy     User?    @relation("ReviewedByRetailReturn", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedByName String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  lines RetailReturnLine[]
+
+  @@index([date])
+}
+
+/// One product on a retail return: what was left with the retail centre, and how
+/// it was split. `stockQty + wasteQty` always equals `leftoverQty`.
+model RetailReturnLine {
+  id          String             @id @default(cuid())
+  reviewId    String
+  review      RetailReturnReview @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product            @relation(fields: [productId], references: [id])
+  leftoverQty Decimal            @db.Decimal(10, 3)
+  stockQty    Decimal            @db.Decimal(10, 3)
+  wasteQty    Decimal            @db.Decimal(10, 3)
+  wasteReason String?
+
+  @@index([reviewId])
+  @@index([productId])
+}
+
+enum FarmDispatchStatus {
+  PENDING
+  CONFIRMED
+  DISPUTED
+}
+
+model FarmDispatch {
+  id            String             @id @default(cuid())
+  date          DateTime           @default(now())
+  declaredItems Json
+  receivedItems Json?
+  status        FarmDispatchStatus @default(PENDING)
+  reason        String?
+  createdAt     DateTime           @default(now())
+  /// When packaging accepted this load into its own stock (the packaging pool —
+  /// src/lib/packaging-pool.ts). Null on loads confirmed the old way, when accepting
+  /// also forwarded to Retail in the same step; those keep their old attribution.
+  acceptedAt    DateTime?
+
+  vanDispatch    VanDispatch? // legacy: Packaging → Van (stage removed; dormant, kept for history)
+  retailDispatch RetailDispatch? // Packaging now dispatches straight to Retail
+
+  @@index([acceptedAt])
+}
+
+model VanDispatch {
+  id             String             @id @default(cuid())
+  date           DateTime           @default(now())
+  farmDispatchId String             @unique
+  farmDispatch   FarmDispatch       @relation(fields: [farmDispatchId], references: [id])
+  declaredItems  Json
+  receivedItems  Json?
+  status         FarmDispatchStatus @default(PENDING)
+  reason         String?
+  createdAt      DateTime           @default(now())
+
+  retailDispatch RetailDispatch?
+}
+
+model RetailDispatch {
+  id             String             @id @default(cuid())
+  date           DateTime           @default(now())
+  // Source dispatch. New rows come straight from Packaging (farmDispatchId).
+  // vanDispatchId is legacy (the removed Van stage) — kept nullable for old rows.
+  farmDispatchId String?            @unique
+  farmDispatch   FarmDispatch?      @relation(fields: [farmDispatchId], references: [id])
+  vanDispatchId  String?            @unique
+  vanDispatch    VanDispatch?       @relation(fields: [vanDispatchId], references: [id])
+  declaredItems  Json
+  receivedItems  Json?
+  status         FarmDispatchStatus @default(PENDING)
+  reason         String?
+  createdAt      DateTime           @default(now())
+  /// When Retail accepted (or disputed) the send. Null on sends confirmed before
+  /// this was recorded; the Flow Log falls back to the change log for those.
+  confirmedAt    DateTime?
+}
+
+// ---------- Routes (Pre-Delivery / Shift Editor) ----------
+
+enum RouteStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+}
+
+model Route {
+  id          String      @id @default(cuid())
+  date        DateTime
+  shiftId     String
+  shift       Shift       @relation(fields: [shiftId], references: [id])
+  locked      Boolean     @default(false)
+  status      RouteStatus @default(PENDING)
+  startedAt   DateTime?
+  completedAt DateTime?
+  /// Set when the day-end close (src/lib/day-close.ts) completed the round
+  /// because the rider had not ended it by midnight. The rider app reads it to
+  /// close the shift on the phone. Null for every round a rider ended himself.
+  autoClosedAt DateTime?
+  createdAt   DateTime    @default(now())
+
+  stops RouteStop[]
+
+  @@unique([date, shiftId])
+}
+
+model RouteStop {
+  id            String    @id @default(cuid())
+  routeId       String
+  route         Route     @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  customerId    String
+  customer      Customer  @relation(fields: [customerId], references: [id])
+  riderId       String?
+  rider         Rider?    @relation(fields: [riderId], references: [id])
+  stopNumber    Int
+  status        String    @default("PENDING")
+  skipReason    String?
+  deliveredAt   DateTime?
+  cashCollected Decimal?  @db.Decimal(12, 2)
+
+  items RouteStopItem[]
+
+  @@index([routeId])
+}
+
+/// A day prepared in the shift editor BEFORE it arrives.
+///
+/// Deliberately not a Route. Route is what the rider's mobile app reads, and rider
+/// access to it is scoped by SHIFT, not by date (supabase/rider_rls.sql) — so a
+/// route dated tomorrow can be read on a rider's phone today. Saving tomorrow as a
+/// Route would hand out the round a day early, which is the one thing this must not
+/// do. Riders have no access to this table at all (RLS on, no policy), and pressing
+/// "Save route" on the day is still the only thing that assigns work.
+model RoutePlan {
+  id      String   @id @default(cuid())
+  shiftId String
+  shift   Shift    @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  /// PKT noon of the day being planned — the same canonical key Route.date uses.
+  date    DateTime
+  /// [{ customerId, stopNumber, products: [{ productId, quantity }] }]
+  /// JSON rather than stop/item tables: a plan is a short-lived draft for one day,
+  /// rewritten whole on every save, and nothing joins to it. The reader drops
+  /// anything that has since gone.
+  stops   Json
+  /// [{ productId, qty }] — the extra items the rider takes that day, on top of
+  /// the customers. They become RiderExtraItem rows when the day's route is saved.
+  extras  Json     @default("[]")
+
+  updatedById String?
+  updatedBy   User?    @relation("UpdatedByRoutePlan", fields: [updatedById], references: [id], onDelete: SetNull)
+  updatedAt   DateTime @updatedAt
+  createdAt   DateTime @default(now())
+
+  @@unique([date, shiftId])
+  @@index([date])
+}
+
+model RouteStopItem {
+  id          String    @id @default(cuid())
+  routeStopId String
+  routeStop   RouteStop @relation(fields: [routeStopId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product   @relation(fields: [productId], references: [id])
+  plannedQty  Decimal   @db.Decimal(10, 3)
+  actualQty   Decimal?  @db.Decimal(10, 3)
+}
+
+// ---------- Deliveries ----------
+
+model DeliveryEntry {
+  id            String   @id @default(cuid())
+  date          DateTime @default(now())
+  customerId    String
+  customer      Customer @relation(fields: [customerId], references: [id])
+  riderId       String?
+  rider         Rider?   @relation(fields: [riderId], references: [id])
+  productId     String
+  product       Product  @relation(fields: [productId], references: [id])
+  quantity      Decimal  @db.Decimal(10, 3)
+  unitRate      Decimal  @db.Decimal(10, 2)
+  isReturn      Boolean  @default(false)
+  isReplacement Boolean  @default(false)
+  /// How many of these litres went out in glass bottles (the rider app records
+  /// it). NULL or 0 = packets, the default. Bottles held are counted from this,
+  /// never from litres — a customer can take 2 L in bottles and 1 L in a packet.
+  bottles       Int?
+  notes         String?
+  createdAt     DateTime @default(now())
+
+  /// Set when this row is the refund or replacement for a CustomerComplaint. Such
+  /// a row is a credit recorded in the office, not milk a rider brought back, so
+  /// the stock trigger, the rider report and the manager edit all skip it on this
+  /// column. Riders cannot delete it either: their delete policy is scoped to their
+  /// own riderId, and these rows carry none.
+  complaintId String?            @unique
+  complaint   CustomerComplaint? @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+
+  @@index([date])
+  @@index([customerId])
+}
+
+// ---------- Customer complaints ----------
+
+enum ComplaintResolution {
+  REFUND // credit the bill for what was delivered
+  REPLACEMENT // send the same product again, free, out of stock
+  NONE // recorded only — nothing credited, nothing sent
+}
+
+/// A customer's complaint about one product on one delivery day.
+///
+/// The money and the stock deliberately do NOT live on this row. A refund or a
+/// replacement is written as a DeliveryEntry (isReturn / isReplacement) linked back
+/// by complaintId, because DeliveryEntry is what every bill, balance, ledger,
+/// Payment Receiving and the customer app already read — so a refund is deducted
+/// everywhere at once and there is no second formula to keep in step. Deleting the
+/// complaint cascades to that row, which undoes the credit everywhere at once too.
+model CustomerComplaint {
+  id            String              @id @default(cuid())
+  customerId    String
+  customer      Customer            @relation(fields: [customerId], references: [id])
+  /// The customer's shift when the complaint was recorded — a snapshot, since
+  /// customers move between shifts.
+  shiftId       String?
+  shift         Shift?              @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  /// PKT noon of the delivery the complaint is about.
+  deliveryDate  DateTime
+  /// PKT noon of the day it was received. The refund / replacement is dated here,
+  /// so it lands on the bill the customer is about to receive.
+  date          DateTime
+  category      String
+  description   String
+  resolution    ComplaintResolution
+  productId     String?
+  product       Product?            @relation(fields: [productId], references: [id])
+  quantity      Decimal?            @db.Decimal(10, 3)
+  /// The rate the customer was actually billed for that delivery.
+  rate          Decimal?            @db.Decimal(10, 2)
+  /// What was credited to the bill. 0 unless resolution = REFUND.
+  amount        Decimal             @default(0) @db.Decimal(12, 2)
+  enteredById   String?
+  enteredBy     User?               @relation("EnteredByComplaint", fields: [enteredById], references: [id], onDelete: SetNull)
+  /// Kept as text as well, so the name survives even if the account is removed.
+  enteredByName String
+  createdAt     DateTime            @default(now())
+
+  deliveryEntry DeliveryEntry?
+
+  @@index([customerId, deliveryDate])
+  @@index([date])
+}
+
+// ---------- Billing ----------
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PARTIAL
+  PAID
+  OVERDUE
+}
+
+model Invoice {
+  id             String        @id @default(cuid())
+  customerId     String
+  customer       Customer      @relation(fields: [customerId], references: [id])
+  month          Int
+  year           Int
+  half           Int           @default(1) // 1 = days 1–15, 2 = day 16–month end
+  periodStart    DateTime?
+  periodEnd      DateTime?
+  dueDate        DateTime? // "Last date" to pay shown on the bill (defaults to month-end)
+  prevBalance    Decimal       @default(0) @db.Decimal(12, 2)
+  deliveriesAmt  Decimal       @default(0) @db.Decimal(12, 2)
+  returnsAmt     Decimal       @default(0) @db.Decimal(12, 2)
+  deliveryCharge Decimal       @default(0) @db.Decimal(10, 2)
+  /// A one-off allowance on THIS bill only — for a delivery that went wrong and
+  /// cannot be put right any other way. Taken off this bill's total and off what
+  /// the customer owes, and it never carries into the next period.
+  discount       Decimal       @default(0) @db.Decimal(12, 2)
+  paymentsAmt    Decimal       @default(0) @db.Decimal(12, 2)
+  totalDue       Decimal       @default(0) @db.Decimal(12, 2)
+  status         InvoiceStatus @default(DRAFT)
+  callCount      Int           @default(0) // collection-call escalation: 0=none, 1/2/3=Nx call
+  callNotes      String?
+  callNotesAt    DateTime?
+  billSentAt     DateTime? // set when staff mark this bill as sent in the "Send bills" dialog (durable, shared across the team)
+  generatedAt    DateTime      @default(now())
+
+  lines InvoiceLine[]
+
+  @@unique([customerId, month, year, half])
+  @@index([customerId])
+}
+
+model InvoiceLine {
+  id              String   @id @default(cuid())
+  invoiceId       String
+  invoice         Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  date            DateTime
+  productId       String
+  product         Product  @relation(fields: [productId], references: [id])
+  quantity        Decimal  @db.Decimal(10, 3)
+  rate            Decimal  @db.Decimal(10, 2)
+  amount          Decimal  @db.Decimal(12, 2)
+  isReturn        Boolean  @default(false)
+  isReplacement   Boolean  @default(false)
+  /// The delivery this line was built from. A bill is rebuilt from the deliveries
+  /// every time it is opened, so an edit to a line has to reach the delivery
+  /// behind it or it is overwritten a moment later. Deliberately a loose id and
+  /// not a relation: the line is a rebuilt copy, and a deleted delivery must not
+  /// take the invoice's history with it.
+  deliveryEntryId String?
+}
+
+// ---------- Payments / Heads / Ledger ----------
+
+enum PaymentHead {
+  RIDER_CASH
+  HBL
+  /// The owners' shared account: what they paid for the farm. Runs in minus —
+  /// see OWNERS_HEAD in src/lib/payment-heads.ts.
+  MEEZAN
+  JAZZCASH
+  EASYPAISA
+  CASH
+}
+
+model Payment {
+  id          String      @id @default(cuid())
+  date        DateTime    @default(now())
+  // Exactly one of customerId / sampleId is set: a normal payment credits a
+  // customer's bill; a sample payment (rider-cash for a delivered free sample)
+  // has no customer and no bill.
+  customerId  String?
+  customer    Customer?   @relation(fields: [customerId], references: [id])
+  sampleId    String?
+  sample      SampleLead? @relation(fields: [sampleId], references: [id])
+  // The rider who actually COLLECTED this cash, stamped at collection time.
+  // Never derive the rider from Customer.riderId — shifts change hands, so that
+  // field goes stale and misattributes the money. This is the source of truth.
+  riderId     String?
+  rider       Rider?      @relation(fields: [riderId], references: [id])
+  amount      Decimal     @db.Decimal(12, 2)
+  head        PaymentHead
+  notes       String?
+  enteredById String?
+  enteredBy   User?       @relation("EnteredByPayment", fields: [enteredById], references: [id])
+  createdAt   DateTime    @default(now())
+
+  // Rider-cash hand-over lifecycle (only used for RIDER_CASH payments).
+  //
+  // Rider Cash is a CASHBOX, not a record of what riders are carrying. A collection
+  // is written the moment the rider takes the money — so the customer's bill drops
+  // straight away — but it does NOT count toward the RIDER_CASH head until
+  // receivedAt is set. Until then it is "cash with riders", in no head at all.
+  // The rule lives in HEAD_PAYMENT_WHERE (src/lib/head-balances.ts) and every
+  // balance computation applies it.
+  //
+  //   handedOverAt set by the mobile app when the rider hands cash to a manager, or
+  //     stamped by the confirm action itself when a rider hands over in person and
+  //     the app recorded nothing;
+  //   receivedAt set when a manager confirms receipt on the Rider Cash page — this
+  //     is what puts the money INTO the box. It no longer creates a HeadTransfer;
+  //     depositing the box to Cash is a separate, manual transfer. (Rows confirmed
+  //     before that change still have a paired RIDER_CASH -> CASH transfer.)
+  handedOverAt   DateTime?
+  handedToName   String?
+  receivedAt     DateTime?
+  receivedByName String? // name of the staff account that confirmed receipt (shown as "Confirmed by …")
+
+  // One rider-cash booking per sample, enforced by the DB rather than by a
+  // read-then-write check. reconcileDeliveredSamples() runs on EVERY samples page
+  // load, so two managers opening the page at once both saw "no payment yet" and
+  // both created one — duplicating rider cash for a single sample delivery.
+  // Postgres treats NULLs as distinct, so this constrains only rows that actually
+  // belong to a sample; the many sampleId-null payments are unaffected.
+  // Money received from a retail mart. Kept as a back-relation to RetailPayment
+  // rather than a third party column, because this model's invariant is "exactly
+  // one of customerId / sampleId is set" and every reader relies on it.
+  retailPayment RetailPayment?
+  /// Set when this cash-in came from a vendor settling what they owe us. The mirror
+  /// of Expense.vendorId — without it a vendor receipt could never be shown on their
+  /// ledger or reversed, which is why one was invisible money until now.
+  vendorId      String?
+  vendor        Vendor?        @relation(fields: [vendorId], references: [id])
+  advanceBill   VendorBill?    @relation("VendorAdvanceBill")
+  // The farm sale this cash came from, if any. A back-relation only (the FK lives
+  // on FarmSale), and the reason the dashboard can leave farm-sale money out of
+  // Collected/Profit with `farmSale: null` instead of matching on notes text.
+  farmSale      FarmSale?
+  /// Which delivery of a sample this pays for: its resendCount at the time. The
+  /// first delivery is round 0, each resend a new round — so a resent sample that
+  /// is delivered again is charged again, but never twice for the same round.
+  sampleRound   Int?
+
+  @@unique([sampleId, sampleRound])
+  @@index([date])
+  @@index([customerId])
+  @@index([sampleId])
+  @@index([riderId])
+  @@index([vendorId])
+}
+
+enum LedgerKind {
+  CUSTOMER
+  HEAD
+  VENDOR
+  EMPLOYEE
+  EXPENSE_CATEGORY
+  PRODUCT
+}
+
+// Single source of truth for financial movements.
+// Aggregations drive customer balances, head balances, vendor outstanding, etc.
+model LedgerEntry {
+  id   String     @id @default(cuid())
+  date DateTime   @default(now())
+  kind LedgerKind
+
+  customerId        String?
+  customer          Customer?    @relation(fields: [customerId], references: [id])
+  head              PaymentHead?
+  vendorId          String?
+  vendor            Vendor?      @relation(fields: [vendorId], references: [id])
+  employeeId        String?
+  productId         String?
+  expenseCategoryId String?
+
+  description    String?
+  debit          Decimal @default(0) @db.Decimal(14, 2)
+  credit         Decimal @default(0) @db.Decimal(14, 2)
+  runningBalance Decimal @default(0) @db.Decimal(14, 2)
+
+  reference String?
+
+  enteredById String?
+  enteredBy   User?    @relation("EnteredBy", fields: [enteredById], references: [id])
+  createdAt   DateTime @default(now())
+
+  @@index([kind, customerId])
+  @@index([kind, head])
+  @@index([kind, vendorId])
+  @@index([date])
+}
+
+/// Money an owner put into the farm out of their own pocket.
+///
+/// NOT a HeadTransfer: there is no owner account inside the farm to be drained,
+/// the money arrives from OUTSIDE. Making the owners payment heads would have
+/// shown a large, permanently growing negative in the head strip.
+///
+/// It is a LIABILITY — the farm owes the owner this back — so it must never be
+/// treated as income. Nothing in reports or the dashboard reads this table, and
+/// nothing should: the farm did not earn the money, it borrowed it.
+///
+/// Every row credits the HBL head (OWNER_FUNDING_HEAD in src/lib/farm-owners.ts),
+/// which is why getHeadBalances() and guardHeadFundsTx() both add it in. `owner`
+/// is validated against FARM_OWNERS in the same file rather than being an enum, so
+/// a third partner is a one-line change and no migration.
+model OwnerContribution {
+  id          String   @id @default(cuid())
+  date        DateTime
+  owner       String
+  amount      Decimal  @db.Decimal(12, 2)
+  reason      String
+  enteredById String?
+  enteredBy   User?    @relation("EnteredByOwnerContribution", fields: [enteredById], references: [id])
+  createdAt   DateTime @default(now())
+
+  @@index([owner])
+  @@index([date])
+}
+
+model HeadTransfer {
+  id        String      @id @default(cuid())
+  date      DateTime    @default(now())
+  fromHead  PaymentHead
+  toHead    PaymentHead
+  amount    Decimal     @db.Decimal(12, 2)
+  notes     String?
+  createdAt DateTime    @default(now())
+}
+
+// ---------- Expenses & Vendors ----------
+
+model ExpenseCategory {
+  id     String  @id @default(cuid())
+  name   String  @unique
+  type   String? // Expense Type: Fixed Asset | Fixed Expense | Liabilities | Variable Expense
+  group  String? // Aggregate group: retail | farm (null = uncategorized)
+  active Boolean @default(true)
+
+  expenses Expense[]
+  budgets  MonthlyBudget[]
+}
+
+/// One photo of an expense's chit / invoice.
+///
+/// `bytes` is the uploaded file's real size, kept so the 10 MB cap across the whole
+/// set can be checked when the expense is saved rather than trusting a count of
+/// files. Rows migrated from the old single-photo column carry 0 — their size was
+/// never recorded, and they are never re-validated.
+model ExpenseChit {
+  id        String   @id @default(cuid())
+  expenseId String
+  expense   Expense  @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  url       String
+  bytes     Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([expenseId])
+}
+
+/// A day somebody did not do enough of their checklist.
+///
+/// MATERIALISED rather than computed on demand, and that is not an optimisation.
+/// ChecklistCompletion is pruned after 60 days and a manager editing a checklist
+/// changes its item count, so a past day's percentage genuinely cannot be
+/// recomputed later — it would silently read 0% and fine everyone. The score has to
+/// be written down on the day it is still knowable.
+///
+/// `employeeId` is nullable because a checklist belongs to a User and only some
+/// Users have a staff record. Those rows are still written, so the shortfall is
+/// visible, but nothing is deducted from a salary that does not exist.
+model ChecklistPenalty {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation("ChecklistPenaltyUser", fields: [userId], references: [id], onDelete: Cascade)
+  employeeId String?
+  employee   Employee? @relation(fields: [employeeId], references: [id])
+  /// The PKT day key, the same shape ChecklistCompletion.date uses.
+  date       DateTime
+  itemsTotal Int
+  itemsDone  Int
+  amount     Decimal   @db.Decimal(10, 2)
+
+  /// A waived day still shows, with its reason — the record of what happened is
+  /// the point, and quietly deleting it would lose that.
+  waivedAt    DateTime?
+  waivedById  String?
+  waiveReason String?
+
+  createdAt DateTime @default(now())
+
+  /// Makes regeneration idempotent: the reconciler can run as often as it likes.
+  @@unique([userId, date])
+  @@index([employeeId, date])
+  @@index([date])
+}
+
+model MonthlyBudget {
+  id         String          @id @default(cuid())
+  categoryId String
+  category   ExpenseCategory @relation(fields: [categoryId], references: [id])
+  /// The item inside the category this budget is for ("Rider/Bike Fuel" under
+  /// Fuel), or "" for the category as a whole. A category's budget is the sum
+  /// of its rows. Not null so the unique key below holds for "" too.
+  item       String          @default("")
+  month      Int
+  year       Int
+  amount     Decimal         @db.Decimal(12, 2)
+
+  @@unique([categoryId, item, month, year])
+}
+
+model Expense {
+  id           String          @id @default(cuid())
+  date         DateTime        @default(now())
+  categoryId   String
+  category     ExpenseCategory @relation(fields: [categoryId], references: [id])
+  amount       Decimal         @db.Decimal(12, 2)
+  head         PaymentHead
+  item         String? // third-level taxonomy item / sub-item
+  description  String?
+  chitReceived Boolean         @default(false)
+  /// The chit photos. A chit is often two or three pages, so this is a list — the
+  /// single chitImageUrl column it replaces could only ever hold the first one.
+  /// The whole set is capped at 10 MB; see src/lib/expense-chits.ts.
+  chits        ExpenseChit[]
+  // Set when this expense is a payment to a vendor, i.e. the cash side of settling
+  // VendorBills. Without it the FIFO application to those bills was a one-way
+  // door: deleting the expense returned the cash to the head but left the bills
+  // marked paid, permanently understating what we owe. Null for ordinary expenses.
+  vendorId     String?
+  vendor       Vendor?         @relation(fields: [vendorId], references: [id])
+  enteredById  String?
+  enteredBy    User?           @relation("EnteredByExpense", fields: [enteredById], references: [id])
+  createdAt    DateTime        @default(now())
+
+  advanceReceivable VendorReceivable? @relation("VendorAdvanceReceivable")
+
+  @@index([date])
+  @@index([categoryId])
+  @@index([vendorId])
+}
+
+model Vendor {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  phone     String?
+  notes     String?
+  createdAt DateTime @default(now())
+
+  bills        VendorBill[]
+  ledger       LedgerEntry[]
+  otcSales     OtcSale[]
+  otcPurchases OtcPurchase[]
+  receivables  VendorReceivable[]
+  expenses     Expense[] // cash paid out to this vendor (settles `bills`)
+  farmSales    FarmSale[] // non-milk goods sold TO them (animals, machinery, feed)
+  payments     Payment[] // cash received FROM them (settles `receivables`)
+}
+
+/// Whether a vendor document is real trade, or a credit created by a payment that
+/// did not line up with what was owed.
+///
+/// An ADVANCE row is the surplus from an over- or under-payment: overpay a vendor
+/// and the extra becomes an ADVANCE VendorReceivable (they owe us); they overpay
+/// us and it becomes an ADVANCE VendorBill (we owe them). It is consumed, without
+/// any cash moving, by the next TRADE document on that side.
+///
+/// The two are never netted on screen — "what we owe them" and "what they owe us"
+/// stay side by side — but settleVendorContra MUST ignore ADVANCE rows, or it nets
+/// an advance against itself and writes a cash pair for money already accounted for.
+enum VendorDocKind {
+  TRADE
+  ADVANCE
+}
+
+model VendorBill {
+  id         String   @id @default(cuid())
+  vendorId   String
+  vendor     Vendor   @relation(fields: [vendorId], references: [id])
+  date       DateTime @default(now())
+  amount     Decimal  @db.Decimal(12, 2)
+  notes      String?
+  paid       Decimal  @default(0) @db.Decimal(12, 2)
+  receiptUrl String? // uploaded photo of the vendor's receipt (proof)
+  createdAt  DateTime @default(now())
+
+  kind            VendorDocKind @default(TRADE)
+  /// Only on ADVANCE rows: the Payment whose surplus created this credit. Without
+  /// the link, reversing that receipt would leave the credit stranded on their books.
+  sourcePaymentId String?       @unique
+  sourcePayment   Payment?      @relation("VendorAdvanceBill", fields: [sourcePaymentId], references: [id])
+
+  otcPurchase OtcPurchase?
+
+  @@index([vendorId, kind])
+}
+
+// The opposite direction of VendorBill: money a vendor owes US (from an
+// Over-the-Counter sale made to them). Tracked as its own model rather than
+// netted against VendorBill, so "what we owe them" and "what they owe us"
+// never silently cancel each other out — always shown side by side.
+/// A sale of something that is not milk — an animal, a machine, feed, scrap.
+///
+/// Deliberately NOT an OtcSale. That model needs a real Product and a milk Unit
+/// (LITER/KG/PIECE/…), and everything that reads it — the dashboard, the summary
+/// report, the reports overview — counts it as revenue. A farm sale is disposing of
+/// an asset, not earning it, so a Rs 265,000 buffalo landing in those figures would
+/// dwarf a month of milk. It is kept out of Profit and reported on its own.
+///
+/// Always paid in full: there is no receivable here and no credit path.
+model FarmSale {
+  id              String   @id @default(cuid())
+  invoiceNo       String   @unique // FSAL-0001
+  date            DateTime
+  buyerType       String // VENDOR | CASH — validated against FARM_SALE_BUYER_TYPES
+  vendorId        String?
+  vendor          Vendor?  @relation(fields: [vendorId], references: [id])
+  cashName        String? // free text for a walk-in with no account
+  transportCharge Decimal  @default(0) @db.Decimal(10, 2)
+  gatePassNo      String? // for animals and machinery leaving the farm
+  narration       String?
+  totalAmount     Decimal  @db.Decimal(12, 2)
+  paymentHead     String // one of INFLOW_HEADS — never RIDER_CASH
+  /// The cash row this sale wrote. @unique so Payment gets a one-to-one
+  /// back-relation, which is what lets the dashboard exclude farm-sale money from
+  /// Collected and Profit without matching on notes text.
+  paymentId       String?  @unique
+  payment         Payment? @relation(fields: [paymentId], references: [id])
+  enteredById     String?
+  enteredBy       User?    @relation("EnteredByFarmSale", fields: [enteredById], references: [id])
+  createdAt       DateTime @default(now())
+
+  lines FarmSaleLine[]
+
+  @@index([date])
+  @@index([vendorId])
+}
+
+/// One line of a farm sale. No productId and no Unit enum on purpose — the item is
+/// free text and the units are the farm's own (head, ton, trolley, bag).
+model FarmSaleLine {
+  id        String   @id @default(cuid())
+  saleId    String
+  sale      FarmSale @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  category  String // animal | machinery | feed | other — see lib/farm-sale-catalog
+  item      String // free text; the catalogue only suggests
+  unit      String // must be one the category offers
+  rate      Decimal  @db.Decimal(12, 2)
+  quantity  Decimal  @db.Decimal(10, 3)
+  amount    Decimal  @db.Decimal(12, 2) // rate x quantity, stored for history integrity
+  /// Typed and indexed while every other animal detail is descriptive: the tag is
+  /// the one field a herd register would join on, so it gets a real column.
+  animalTag String?
+  /// The rest of the category's answers (weight, status, make/model, serial,
+  /// condition, pit/batch, moisture, detail). Display-only.
+  details   Json?
+
+  @@index([saleId])
+  @@index([animalTag])
+}
+
+model VendorReceivable {
+  id        String   @id @default(cuid())
+  vendorId  String
+  vendor    Vendor   @relation(fields: [vendorId], references: [id])
+  date      DateTime @default(now())
+  amount    Decimal  @db.Decimal(12, 2)
+  notes     String?
+  received  Decimal  @default(0) @db.Decimal(12, 2)
+  createdAt DateTime @default(now())
+
+  kind            VendorDocKind @default(TRADE)
+  /// Only on ADVANCE rows: the Expense whose surplus created this credit. Without
+  /// it, deleting that Expense returns the cash to the head and strands the surplus.
+  sourceExpenseId String?       @unique
+  sourceExpense   Expense?      @relation("VendorAdvanceReceivable", fields: [sourceExpenseId], references: [id])
+
+  otcSale OtcSale?
+
+  @@index([vendorId, kind])
+}
+
+// ---------- Over the Counter (walk-in sale / purchase) ----------
+
+// A single itemized walk-in sale. Money and stock effects both fire the
+// moment it's saved (physical goods leave immediately regardless of payment
+// status): a COUNTER_SALE InventoryMovement is written per line. Paid now ->
+// a real Payment. On credit -> for a Regular customer, computePrevBalance()
+// picks it up as an unpaid charge; for a Vendor, a VendorReceivable is
+// created (mirrors how OtcPurchase creates a VendorBill, just the opposite
+// direction — money they owe us instead of money we owe them). Cash
+// (walk-in) sales can never be on credit — there's no account to bill later.
+model OtcSale {
+  id                 String            @id @default(cuid())
+  invoiceNo          String            @unique
+  date               DateTime          @default(now())
+  customerType       String // CASH | REGULAR | VENDOR | RETAIL
+  customerId         String?
+  customer           Customer?         @relation(fields: [customerId], references: [id])
+  vendorId           String?
+  vendor             Vendor?           @relation(fields: [vendorId], references: [id])
+  cashName           String? // free text when customerType = CASH
+  deliveryCharge     Decimal           @default(0) @db.Decimal(10, 2)
+  narration          String?
+  totalAmount        Decimal           @db.Decimal(12, 2)
+  // Amount settled in cash at sale time. The credit remainder is always
+  // totalAmount - paidAmount. paymentStatus below is derived from these two
+  // (PAID = fully, CREDIT = 0, PARTIAL = in between) and is display-only —
+  // the money math keys off paidAmount, never the string.
+  paidAmount         Decimal           @default(0) @db.Decimal(12, 2)
+  paymentStatus      String            @default("PAID") // PAID | PARTIAL | CREDIT (derived from paidAmount)
+  paymentHead        String? // the head the cash landed in when paidAmount > 0
+  vendorReceivableId String?           @unique
+  vendorReceivable   VendorReceivable? @relation(fields: [vendorReceivableId], references: [id])
+  // A straight counter sale to a retail mart (NOT a consignment drop — those live
+  // in RetailPlacement). Credit creates a RetailReceivable, mirroring how a VENDOR
+  // sale creates a VendorReceivable.
+  retailVendorId     String?
+  retailVendor       RetailVendor?     @relation(fields: [retailVendorId], references: [id])
+  retailReceivableId String?           @unique
+  retailReceivable   RetailReceivable? @relation(fields: [retailReceivableId], references: [id])
+  enteredById        String?
+  enteredBy          User?             @relation("EnteredByOtcSale", fields: [enteredById], references: [id])
+  createdAt          DateTime          @default(now())
+
+  lines OtcSaleLine[]
+
+  @@index([date])
+  @@index([customerId])
+  @@index([vendorId])
+  @@index([retailVendorId])
+}
+
+model OtcSaleLine {
+  id        String  @id @default(cuid())
+  saleId    String
+  sale      OtcSale @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  unit      String // snapshot of Product.unit at sale time
+  rate      Decimal @db.Decimal(10, 2) // as entered — negotiable, may differ from Product.defaultRate
+  quantity  Decimal @db.Decimal(10, 3)
+  amount    Decimal @db.Decimal(12, 2) // rate x quantity, stored for history integrity
+}
+
+// A single itemized walk-in purchase from a vendor. paymentStatus=PAID
+// creates a fully-settled VendorBill plus an Expense (same "Vendor Payment"
+// mechanics as recordVendorPayment); CREDIT creates an unpaid VendorBill so
+// it shows up in the existing Vendor Bills / outstanding tracking untouched.
+model OtcPurchase {
+  id             String      @id @default(cuid())
+  invoiceNo      String      @unique
+  date           DateTime    @default(now())
+  vendorId       String
+  vendor         Vendor      @relation(fields: [vendorId], references: [id])
+  narration      String?
+  deliveryCharge Decimal     @default(0) @db.Decimal(10, 2) // freight/handling on this purchase; folded into totalAmount (mirrors OtcSale.deliveryCharge)
+  totalAmount    Decimal     @db.Decimal(12, 2)
+  // Amount paid in cash at purchase time; credit remainder = totalAmount - paidAmount.
+  // paymentStatus is derived (PAID/PARTIAL/CREDIT) and display-only.
+  paidAmount     Decimal     @default(0) @db.Decimal(12, 2)
+  paymentStatus  String      @default("PAID") // PAID | PARTIAL | CREDIT (derived from paidAmount)
+  paymentHead    String?
+  vendorBillId   String?     @unique
+  vendorBill     VendorBill? @relation(fields: [vendorBillId], references: [id])
+  enteredById    String?
+  enteredBy      User?       @relation("EnteredByOtcPurchase", fields: [enteredById], references: [id])
+  createdAt      DateTime    @default(now())
+
+  lines OtcPurchaseLine[]
+
+  @@index([date])
+  @@index([vendorId])
+}
+
+model OtcPurchaseLine {
+  id         String      @id @default(cuid())
+  purchaseId String
+  purchase   OtcPurchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product     @relation(fields: [productId], references: [id])
+  unit       String
+  rate       Decimal     @db.Decimal(10, 2)
+  quantity   Decimal     @db.Decimal(10, 3)
+  amount     Decimal     @db.Decimal(12, 2)
+}
+
+// ---------- Salaries ----------
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  HALF_DAY
+  HOLIDAY
+}
+
+model Attendance {
+  id         String           @id @default(cuid())
+  employeeId String
+  employee   Employee         @relation(fields: [employeeId], references: [id])
+  date       DateTime
+  status     AttendanceStatus @default(PRESENT)
+
+  @@unique([employeeId, date])
+}
+
+model Bonus {
+  id          String   @id @default(cuid())
+  employeeId  String
+  employee    Employee @relation(fields: [employeeId], references: [id])
+  month       Int
+  year        Int
+  amount      Decimal  @db.Decimal(12, 2)
+  description String?
+}
+
+model Deduction {
+  id          String   @id @default(cuid())
+  employeeId  String
+  employee    Employee @relation(fields: [employeeId], references: [id])
+  month       Int
+  year        Int
+  amount      Decimal  @db.Decimal(12, 2)
+  description String?
+}
+
+model SalaryPayment {
+  id         String      @id @default(cuid())
+  employeeId String
+  employee   Employee    @relation(fields: [employeeId], references: [id])
+  month      Int
+  year       Int
+  amount     Decimal     @db.Decimal(12, 2)
+  head       PaymentHead
+  notes      String?
+  paidAt     DateTime    @default(now())
+}
+
+// ---------- Recovery / Notes / Alerts ----------
+
+enum RecoveryStatus {
+  OVERDUE
+  MILK_DISABLED
+  IN_RECOVERY
+  CLEARED
+}
+
+model RecoveryCase {
+  id          String         @id @default(cuid())
+  customerId  String
+  customer    Customer       @relation(fields: [customerId], references: [id])
+  status      RecoveryStatus @default(OVERDUE)
+  daysOverdue Int            @default(0)
+  visits      Int            @default(0) // times someone went to collect dues
+  notes       String?
+  callStatus  String?
+  openedAt    DateTime       @default(now())
+  closedAt    DateTime?
+
+  visitLogs RecoveryVisit[]
+
+  @@index([status])
+}
+
+// One row per collection visit: a mandatory note (what the customer said) and the
+// timestamp of the entry, so each visit's date/time can be tracked.
+model RecoveryVisit {
+  id        String       @id @default(cuid())
+  caseId    String
+  case      RecoveryCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  note      String
+  createdAt DateTime     @default(now())
+
+  @@index([caseId])
+}
+
+enum NoteType {
+  ORDER_CHANGE
+  TASK
+  COMPLAINT
+  TEMP_STOP
+  DESI_GHEE
+  DESI_EGGS
+  BILL_ISSUE
+  REQUEST
+  NOTE
+}
+
+enum NotePriority {
+  NORMAL
+  HIGH
+  EXTREME
+}
+
+enum NoteStatus {
+  PENDING
+  IN_PROGRESS
+  SOLVED
+  TASK_COMPLETED
+}
+
+model DailyNote {
+  id          String       @id @default(cuid())
+  date        DateTime     @default(now())
+  type        NoteType
+  priority    NotePriority @default(NORMAL)
+  status      NoteStatus   @default(PENDING)
+  title       String
+  body        String?
+  authorName  String?
+  customerId  String?
+  customer    Customer?    @relation(fields: [customerId], references: [id])
+  createdById String?
+  createdBy   User?        @relation("CreatedByNote", fields: [createdById], references: [id])
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  followups NoteFollowup[]
+}
+
+model NoteFollowup {
+  id        String    @id @default(cuid())
+  noteId    String
+  note      DailyNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  body      String
+  createdAt DateTime  @default(now())
+}
+
+// ---------- Task management (assign work to employees / riders) ----------
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+}
+
+model Task {
+  id           String       @id @default(cuid())
+  title        String
+  note         String?
+  assigneeId   String? // employee or rider id (denormalized; no hard FK)
+  assigneeName String
+  deadline     DateTime
+  priority     NotePriority @default(NORMAL)
+  status       TaskStatus   @default(PENDING)
+  authorName   String?
+  completedAt  DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  followups TaskFollowup[]
+
+  @@index([deadline])
+  @@index([status])
+}
+
+model TaskFollowup {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  body      String
+  createdAt DateTime @default(now())
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+model Alert {
+  id         String        @id @default(cuid())
+  type       String
+  severity   AlertSeverity @default(INFO)
+  message    String
+  reference  String?
+  resolved   Boolean       @default(false)
+  createdAt  DateTime      @default(now())
+  resolvedAt DateTime?
+}
+
+model Lead {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String
+  area      String?
+  status    String   @default("Total")
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ---------- Free Samples (lead pipeline) ----------
+
+enum SampleStatus {
+  ASSIGNED // entered, about to be sent
+  DELIVERED // sample delivered, no feedback yet
+  NOT_DELIVERED // the run went out but the rider could not deliver it — resend to try again
+  FOLLOWUP // being called for review
+  CONVERTED // became a regular customer
+  DECLINED // decided not to convert
+}
+
+model SampleLead {
+  id          String  @id @default(cuid())
+  supabaseId  String? @unique // Supabase Auth uid for a self-signed-up lead (cleared on conversion)
+  name        String
+  invoiceName String?
+  phone       String
+  secondPhone String?
+  email       String?
+  address     String?
+  locationUrl String?
+
+  areaId  String?
+  area    Area?   @relation(fields: [areaId], references: [id])
+  shiftId String?
+  shift   Shift?  @relation(fields: [shiftId], references: [id])
+
+  status SampleStatus @default(ASSIGNED)
+  notes  String?
+
+  scheduledDate DateTime? // reserved / unused — samples ride the next completed run of their shift
+  deliveredAt   DateTime?
+  resendCount   Int       @default(0)
+  /// When the sample was last put on a run (created, or resent). Only a route of
+  /// its shift completed AFTER this can deliver it. Null on older rows, which fall
+  /// back to createdAt. Without it a resent sample matched the run that delivered
+  /// it the first time and was marked delivered again at once.
+  assignedAt    DateTime?
+
+  /// What the rider reported in the app (or the office on the Samples page):
+  /// "DELIVERED" | "NOT_DELIVERED", or null when nothing was reported — the old
+  /// behaviour, where a completed run counts as delivered.
+  riderOutcome       String?
+  riderOutcomeAt     DateTime?
+  notDeliveredReason String?
+  /// How the customer paid for the sample: "CASH" | "HBL" | "JAZZCASH" |
+  /// "EASYPAISA". Null = cash with the rider (the old behaviour).
+  paymentMethod      String?
+
+  convertedCustomerId String?   @unique
+  convertedCustomer   Customer? @relation("SampleConversion", fields: [convertedCustomerId], references: [id])
+  convertedAt         DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items     SampleItem[]
+  followups SampleFollowup[]
+  payments  Payment[] // rider-cash collected when the sample is delivered
+
+  @@index([status])
+}
+
+model SampleItem {
+  id          String     @id @default(cuid())
+  sampleId    String
+  sample      SampleLead @relation(fields: [sampleId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product    @relation(fields: [productId], references: [id])
+  quantity    Decimal    @db.Decimal(10, 3)
+  ratePerUnit Decimal    @default(0) @db.Decimal(10, 2)
+}
+
+model SampleFollowup {
+  id        String     @id @default(cuid())
+  sampleId  String
+  sample    SampleLead @relation(fields: [sampleId], references: [id], onDelete: Cascade)
+  body      String
+  createdAt DateTime   @default(now())
+}
+
+// ---------- Customer app (self-service) ----------
+
+// One-off / shop order placed by the customer for a specific day. Permanent
+// subscription changes live in CustomerProduct (admin-edited), not here.
+model CustomerOrder {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  forDate    DateTime // the delivery day this order is for
+  type       String   @default("ONE_DAY") // ONE_DAY | SHOP
+  status     String   @default("PENDING") // PENDING | CONFIRMED | CANCELLED
+  notes      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  items CustomerOrderItem[]
+
+  @@index([customerId, forDate])
+  @@index([forDate])
+}
+
+model CustomerOrderItem {
+  id        String        @id @default(cuid())
+  orderId   String
+  order     CustomerOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product       @relation(fields: [productId], references: [id])
+  quantity  Decimal       @db.Decimal(10, 3)
+}
+
+// Customer-set delivery calendar (off days / vacations).
+model CustomerCalendarDay {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  date       DateTime
+  status     String   @default("SCHEDULED") // SCHEDULED | NO_DELIVERY | VACATION
+  createdAt  DateTime @default(now())
+
+  @@unique([customerId, date])
+  @@index([date])
+}
+
+// Per-customer notification feed.
+model CustomerNotification {
+  id         String    @id @default(cuid())
+  customerId String
+  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  type       String // e.g. ORDER, PAYMENT, INFO
+  title      String
+  body       String
+  createdAt  DateTime  @default(now())
+  readAt     DateTime?
+
+  @@index([customerId, createdAt])
+}
+
+// Customer-submitted "I paid, here's the receipt". A manager reviews it; on
+// approval a real Payment is created (see reviewPaymentProof) so bills/heads stay correct.
+model PaymentProof {
+  id            String    @id @default(cuid())
+  customerId    String
+  customer      Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  amount        Decimal   @db.Decimal(12, 2)
+  method        String // CASH | HBL | JAZZCASH | EASYPAISA | ...
+  date          DateTime // when the customer says they paid
+  screenshotUrl String?
+  status        String    @default("PENDING") // PENDING | APPROVED | REJECTED
+  reviewNote    String?
+  createdAt     DateTime  @default(now())
+  reviewedAt    DateTime?
+
+  @@index([status])
+  @@index([customerId])
+}
+
+// ---------- Skim Milk Processing ----------
+
+model SkimMilkBatch {
+  id           String   @id @default(cuid())
+  date         DateTime @default(now())
+  pktDate      String? // "YYYY-MM-DD" — user's form date (PKT)
+  buffaloMilk  Decimal  @default(0) @db.Decimal(12, 3)
+  cowMilk      Decimal  @default(0) @db.Decimal(12, 3)
+  mixMilk      Decimal  @default(0) @db.Decimal(12, 3)
+  milkUsed     Decimal  @db.Decimal(12, 3) // = buffaloMilk + cowMilk + mixMilk
+  creamMade    Decimal  @map("cheeseMade") @db.Decimal(12, 3)
+  skimMilkMade Decimal  @db.Decimal(12, 3)
+  notes        String?
+  createdAt    DateTime @default(now())
+
+  @@index([date])
+  @@index([pktDate])
+}
+
+// ---------- Mix Milk Processing ----------
+
+model MixMilkBatch {
+  id          String   @id @default(cuid())
+  date        DateTime @default(now())
+  pktDate     String?
+  buffaloMilk Decimal  @default(0) @db.Decimal(12, 3)
+  cowMilk     Decimal  @default(0) @db.Decimal(12, 3)
+  mixMilkMade Decimal  @db.Decimal(12, 3)
+  notes       String?
+  createdAt   DateTime @default(now())
+
+  @@index([date])
+  @@index([pktDate])
+}
+
+// ---------- Buffalo Milk Standardisation ----------
+
+// Buffalo milk comes off the animal too rich, so cow milk is stirred into it
+// before anything else is done with it. The milk does not change hands — it moves
+// between two products: cow loses what buffalo gains. Both figures are kept, so
+// "produced by the animal" and "prepared for use" stay separate numbers.
+model BuffaloDilutionBatch {
+  id           String   @id @default(cuid())
+  date         DateTime @default(now())
+  pktDate      String? // "YYYY-MM-DD" — the PKT day this belongs to
+  buffaloBase  Decimal  @default(0) @db.Decimal(12, 3) // buffalo produced when the entry was made (kept for the audit trail)
+  cowMilkAdded Decimal  @db.Decimal(12, 3)
+  notes        String?
+  createdAt    DateTime @default(now())
+
+  @@index([date])
+  @@index([pktDate])
+}
+
+// ---------- Yoghurt Processing ----------
+
+model YoghurtBatch {
+  id              String   @id @default(cuid())
+  date            DateTime @default(now())
+  buffaloMilk     Decimal  @db.Decimal(12, 3)
+  cowMilk         Decimal  @db.Decimal(12, 3)
+  mixMilk         Decimal  @db.Decimal(12, 3)
+  boilingWaste    Decimal  @db.Decimal(12, 3)
+  yoghurtProduced Decimal  @db.Decimal(12, 3)
+  productionWaste Decimal  @db.Decimal(12, 3)
+  notes           String?
+  createdAt       DateTime @default(now())
+
+  @@index([date])
+}
+
+// ---------- WhatsApp (web.js worker + DB-as-bus) ----------
+
+// Single-row connection state, owned/updated by the standalone worker.
+model WhatsappSession {
+  id              String    @id @default("default")
+  status          String    @default("DISCONNECTED") // STARTING | QR | CONNECTED | DISCONNECTED
+  qr              String?   @db.Text // QR rendered as a data-URL PNG
+  connectedNumber String?
+  logoutRequested Boolean   @default(false)
+  lastSeenAt      DateTime? // worker heartbeat
+  updatedAt       DateTime  @updatedAt
+}
+
+model MessageTemplate {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  body      String   @db.Text // supports {{placeholders}}
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([active])
+}
+
+// Generic key-value store for app-wide settings (e.g. billing.lastDate).
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+// Push-notification device registrations for the customer-facing mobile app
+// (a separate codebase — this table was created directly against this DB and
+// only declared here so `prisma db push` doesn't try to drop it). Not used
+// or written by anything in this repo.
+model DeviceToken {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  token      String   @unique
+  platform   String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([customerId], map: "device_token_customer_idx")
+}
+
+// Outbound message queue + history. The worker claims PENDING rows and sends.
+model WhatsappMessageLog {
+  id         String    @id @default(cuid())
+  customerId String? // loose FK (no relation), like Task.assigneeId
+  templateId String?
+  phone      String // normalized digits, e.g. 923325862900
+  body       String    @db.Text
+  status     String    @default("PENDING") // PENDING | SENDING | SENT | FAILED
+  error      String?
+  attempts   Int       @default(0)
+  sentAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([status, createdAt])
+}
+
+// ---------- Daily Checklists ----------
+// A checklist is assigned to a User (an existing dashboard login); that person
+// signs in, sees ONLY their own checklist, and ticks each item themselves — a
+// completion is the record that THAT person did the task, so no one else ticks
+// on their behalf. Modelled on Attendance: one completion row per item per day
+// (@@unique([itemId, date])), so a new day is naturally empty (no reset job) and
+// "done today" = a row exists for (item, today).
+
+model Checklist {
+  id         String   @id @default(cuid())
+  title      String
+  roleLabel  String? // optional display label, e.g. "Milking Operator"
+  assigneeId String
+  assignee   User     @relation("ChecklistAssignee", fields: [assigneeId], references: [id])
+  dueTime    String // "HH:MM" PKT time-of-day the checklist is due
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  items ChecklistItem[]
+
+  @@index([assigneeId])
+}
+
+model ChecklistItem {
+  id          String    @id @default(cuid())
+  checklistId String
+  checklist   Checklist @relation(fields: [checklistId], references: [id], onDelete: Cascade)
+  label       String
+  order       Int       @default(0)
+  // Optional "HH:MM" PKT time this single task should be done by. Purely
+  // informational: missing it colours the task red so a late finish is visible,
+  // and deliberately raises NO alert — only the checklist's own dueTime does.
+  dueTime     String?
+
+  completions ChecklistCompletion[]
+  notes       ChecklistNote[]
+
+  @@index([checklistId])
+}
+
+// A remark the assignee leaves against one task on one day — "tank valve was
+// stiff", "delivered late, gate locked". Kept separately from the tick so an
+// accidental untick does not throw away what they wrote, and keyed by the same
+// PKT day, so yesterday's notes drop out of view exactly like yesterday's ticks.
+model ChecklistNote {
+  id        String        @id @default(cuid())
+  itemId    String
+  item      ChecklistItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  date      DateTime // pktNoonToUTC(todayPKTString()) — the PKT day key
+  body      String
+  authorId  String?
+  author    User?         @relation("ChecklistNoteAuthor", fields: [authorId], references: [id])
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@unique([itemId, date])
+  @@index([date])
+}
+
+model ChecklistCompletion {
+  id       String        @id @default(cuid())
+  itemId   String
+  item     ChecklistItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  date     DateTime // pktNoonToUTC(todayPKTString()) — the PKT day key
+  doneAt   DateTime      @default(now())
+  // Who actually ticked it. Only the assignee may tick (both the web action and
+  // the rider API enforce that), so this normally equals the checklist's assignee
+  // — it is recorded explicitly so the audit trail does not depend on that rule
+  // never changing. Nullable: rows ticked before this column existed have no actor.
+  doneById String?
+  doneBy   User?         @relation("ChecklistTickedBy", fields: [doneById], references: [id])
+
+  @@unique([itemId, date])
+  @@index([date])
+  @@index([doneById])
+}
+
+// ---------- Retail Marts (consignment) ----------
+
+// Shop and supermarket owners who take our product ON CONSIGNMENT: the delivery
+// boy leaves stock with them, and days later they report how much sold and how
+// much expired, then pay for the sold part.
+//
+// Deliberately a separate party type from `Vendor`. A vendor is someone we BUY
+// from (VendorBill = money we owe); a mart is someone product goes OUT to on
+// trust (RetailReceivable = money they owe us). Merging the two would move the
+// vendor figures on the dashboard and the summary report the day this shipped.
+model RetailVendor {
+  id           String   @id @default(cuid())
+  name         String   @unique
+  managerName  String?
+  phone        String?
+  address      String?
+  // Free text, NOT the Area relation: Area carries a delivery schedule and feeds
+  // the route planner. A supermarket is not a stop on a milk round.
+  areaName     String?
+  city         String?
+  notes        String?
+  // How many days after a drop we go back and ask what sold. The farm-wide
+  // default is 3; a shop that always takes a week carries its own number.
+  followUpDays Int      @default(3)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  placements  RetailPlacement[]
+  resolutions RetailResolution[]
+  receivables RetailReceivable[]
+  payments    RetailPayment[]
+  otcSales    OtcSale[]
+
+  @@index([active])
+  @@index([city])
+}
+
+// One drop visit. The stock leaves storage the moment this is saved — see the
+// `retailOut` term in src/lib/inventory-onhand.ts, which reads the lines below
+// directly. NO InventoryMovement is written by this module, ever: the line IS
+// the record, so the same litres can never be deducted twice.
+model RetailPlacement {
+  id             String       @id @default(cuid())
+  placementNo    String       @unique // "RP-0001"
+  retailVendorId String
+  retailVendor   RetailVendor @relation(fields: [retailVendorId], references: [id])
+  date           DateTime
+  // Override for "come back on this date". Null = date + vendor.followUpDays.
+  followUpAt     DateTime?
+  notes          String?
+  // Voiding an UNRESOLVED drop returns the stock, because the lines fall out of
+  // the retailOut query. A resolved drop can never be voided.
+  voidedAt       DateTime?
+  voidedById     String?
+  voidedBy       User?        @relation("VoidedByRetailPlacement", fields: [voidedById], references: [id])
+  voidReason     String?
+  enteredById    String?
+  enteredBy      User?        @relation("EnteredByRetailPlacement", fields: [enteredById], references: [id])
+  createdAt      DateTime     @default(now())
+
+  lines       RetailPlacementLine[]
+  resolutions RetailResolution[]
+
+  @@index([retailVendorId])
+  @@index([date])
+  @@index([voidedAt])
+}
+
+model RetailPlacementLine {
+  id          String          @id @default(cuid())
+  placementId String
+  placement   RetailPlacement @relation(fields: [placementId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product         @relation(fields: [productId], references: [id])
+  unit        String // snapshot of Product.unit at drop time
+  rate        Decimal         @db.Decimal(10, 2) // agreed shop rate — negotiable per mart
+  // What was dropped. IMMUTABLE after create: this is the figure the stock
+  // deduction reads, so a resolution must never touch it.
+  quantity    Decimal         @db.Decimal(12, 3)
+  // Snapshot of the pack size at drop time, so editing the product later never
+  // rewrites what a past drop said. Null for products not sold in packs.
+  packSize    Decimal?        @db.Decimal(10, 3)
+  // Running totals across every resolution of this line. openQty is
+  // (quantity - soldQty - wastedQty) and is derived, never stored.
+  soldQty     Decimal         @default(0) @db.Decimal(12, 3)
+  wastedQty   Decimal         @default(0) @db.Decimal(12, 3)
+
+  resolutionLines RetailResolutionLine[]
+
+  @@index([placementId])
+  @@index([productId])
+}
+
+// One "we went back and asked" event. A drop can be resolved in parts: sold 6,
+// wasted 1, and the remaining 3 still on their shelf to be resolved next visit.
+model RetailResolution {
+  id             String            @id @default(cuid())
+  resolutionNo   String            @unique // "RR-0001"
+  placementId    String
+  placement      RetailPlacement   @relation(fields: [placementId], references: [id], onDelete: Cascade)
+  // Denormalised from the placement so a mart's whole history is one query.
+  retailVendorId String
+  retailVendor   RetailVendor      @relation(fields: [retailVendorId], references: [id])
+  date           DateTime
+  soldAmount     Decimal           @db.Decimal(12, 2) // what they owe us for this visit
+  wastedValue    Decimal           @db.Decimal(12, 2) // revenue forgone, valued at the shop rate
+  // Money actually out of pocket: the same quantity at what the stock cost US.
+  // A sibling of wastedValue, not a replacement — one answers "what did we fail
+  // to earn", the other "what did we spend". Null when any expired line has no
+  // cost recorded, because a partial total is worse than none.
+  wastedCost     Decimal?          @db.Decimal(12, 2)
+  notes          String?
+  receivableId   String?           @unique
+  receivable     RetailReceivable? @relation(fields: [receivableId], references: [id])
+  // Set by the dialog, one per open. Makes a double-click a no-op instead of two
+  // resolutions that both look legitimate.
+  clientToken    String?           @unique
+  enteredById    String?
+  enteredBy      User?             @relation("EnteredByRetailResolution", fields: [enteredById], references: [id])
+  createdAt      DateTime          @default(now())
+
+  lines RetailResolutionLine[]
+
+  @@index([placementId])
+  @@index([retailVendorId])
+  @@index([date])
+}
+
+model RetailResolutionLine {
+  id              String              @id @default(cuid())
+  resolutionId    String
+  resolution      RetailResolution    @relation(fields: [resolutionId], references: [id], onDelete: Cascade)
+  placementLineId String
+  placementLine   RetailPlacementLine @relation(fields: [placementLineId], references: [id])
+  soldQty         Decimal             @db.Decimal(12, 3)
+  wastedQty       Decimal             @db.Decimal(12, 3)
+  rate            Decimal             @db.Decimal(10, 2) // copy of the line's rate at resolution time
+  // Product.costPrice as it stood when this was reported. Snapshotted because the
+  // cost is editable at any time, and a loss already booked must never move.
+  unitCost        Decimal?            @db.Decimal(10, 2)
+  amount          Decimal             @db.Decimal(12, 2) // soldQty x rate
+
+  @@index([resolutionId])
+  @@index([placementLineId])
+}
+
+// Money a mart owes us. Mirrors VendorReceivable exactly, in its own table so the
+// vendor figures on the dashboard and the summary report are untouched.
+model RetailReceivable {
+  id             String       @id @default(cuid())
+  retailVendorId String
+  retailVendor   RetailVendor @relation(fields: [retailVendorId], references: [id])
+  date           DateTime     @default(now())
+  amount         Decimal      @db.Decimal(12, 2)
+  received       Decimal      @default(0) @db.Decimal(12, 2)
+  source         String // PLACEMENT | OTC
+  notes          String?
+  createdAt      DateTime     @default(now())
+
+  resolution RetailResolution?
+  otcSale    OtcSale?
+
+  @@index([retailVendorId])
+  @@index([date])
+}
+
+// The retail-vendor link Payment does not have. The cash itself is an ordinary
+// Payment row (so head balances pick it up with no changes anywhere); this row
+// says which mart it came from.
+model RetailPayment {
+  id             String       @id @default(cuid())
+  retailVendorId String
+  retailVendor   RetailVendor @relation(fields: [retailVendorId], references: [id])
+  date           DateTime     @default(now())
+  amount         Decimal      @db.Decimal(12, 2)
+  head           PaymentHead
+  paymentId      String       @unique
+  payment        Payment      @relation(fields: [paymentId], references: [id])
+  notes          String?
+  enteredById    String?
+  enteredBy      User?        @relation("EnteredByRetailPayment", fields: [enteredById], references: [id])
+  createdAt      DateTime     @default(now())
+
+  @@index([retailVendorId])
+  @@index([date])
+}
+
+// Retail products (Product.retailOnly) are stocked by hand here — they have no
+// dispatch chain, no production run and no vendor bill to derive a count from.
+//
+// This is the ONLY inbound such a product has. It is deliberately not an
+// InventoryMovement: that table means farm stock, and a new movement type would
+// land uninvited in stockHistoryOf(), the reconciliation snapshot and the waste
+// reason list. A table can also simply be dropped to restore every prior figure,
+// which an enum value cannot.
+//
+// Quantity is ALWAYS positive. A mistake is voided, never negated — a signed
+// column would quietly become a write-off channel, which is not what this is.
+model RetailStockEntry {
+  id          String    @id @default(cuid())
+  date        DateTime
+  productId   String
+  product     Product   @relation(fields: [productId], references: [id])
+  quantity    Decimal   @db.Decimal(12, 3)
+  note        String?
+  // A voided entry falls out of the on-hand query entirely, exactly as a voided
+  // placement does. Unlike voiding a drop — which returns stock and can never go
+  // negative — voiding an add REMOVES stock, so it is stock-guarded.
+  voidedAt    DateTime?
+  voidedById  String?
+  voidedBy    User?     @relation("VoidedByRetailStockEntry", fields: [voidedById], references: [id])
+  voidReason  String?
+  enteredById String?
+  enteredBy   User?     @relation("EnteredByRetailStockEntry", fields: [enteredById], references: [id])
+  createdAt   DateTime  @default(now())
+
+  @@index([productId])
+  @@index([date])
+  @@index([voidedAt])
+}
+
+// ---------- Audit ----------
+
+/// Every add, edit and delete in the software, with who did it and what changed.
+///
+/// Written ONLY by the `trg_audit_row` database trigger — never by application
+/// code. A trigger is the only thing that sees every writer: the website, the
+/// rider and customer apps writing straight to Postgres, the raw SQL a few
+/// actions use, the other triggers, the worker and the maintenance scripts.
+///
+/// Append-only. A BEFORE UPDATE OR DELETE trigger refuses both, so neither an
+/// admin, nor a server action, nor a raw query can rewrite history; only
+/// prune_audit_log() may remove anything, and only what is older than the
+/// retention window. See supabase/audit-log.sql.
+///
+/// actorId is a plain String, NOT a relation to User: a user with no records of
+/// their own is hard-deleted (users/actions.ts), and a trail that loses its actor
+/// when the actor goes is not a trail. actorName and actorRole are snapshots
+/// taken at the moment of the write, for the same reason.
+model AuditLog {
+  id            String   @id @default(cuid())
+  tableName     String
+  /// The row's id. Null only if an audited table ever lacks one.
+  rowId         String?
+  operation     String // INSERT | UPDATE | DELETE
+  /// On an update these hold ONLY the fields that moved — two keys, not sixty.
+  /// An insert keeps the whole new row in `after`, a delete the whole old row in
+  /// `before`: in each case that is what the change was.
+  before        Json?
+  after         Json?
+  changedFields String[]
+  actorId       String?
+  actorName     String?
+  actorRole     String?
+  /// web | mobile | unknown — "unknown" is a write that reached the database
+  /// without going through the app: a script, psql, or the SQL editor.
+  actorSource   String   @default("unknown")
+  at            DateTime @default(now())
+
+  @@index([at(sort: Desc)])
+  @@index([tableName, at(sort: Desc)])
+  @@index([actorId, at(sort: Desc)])
+  @@index([tableName, rowId, at(sort: Desc)])
+}
+
+// ---------- Customer Recovery (win-back) ----------
+
+// One per customer someone is trying to win back: a lost customer (INACTIVE or
+// DISABLED), or anyone added to the list by hand. Created on the first status
+// change, call or note — a lost customer nobody has touched has no row and reads
+// as "Not Contacted".
+//
+// Named win-back, not recovery, because RecoveryCase already means money owed.
+model WinbackCase {
+  id         String            @id @default(cuid())
+  customerId String            @unique
+  customer   Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  status     String            @default("Not Contacted")
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+  activities WinbackActivity[]
+}
+
+// The case's timeline: every status change, call and note, with who and when.
+model WinbackActivity {
+  id         String      @id @default(cuid())
+  caseId     String
+  case       WinbackCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  type       String // STATUS | CALL | NOTE
+  text       String?
+  fromStatus String?
+  toStatus   String?
+  byId       String?
+  byName     String?
+  at         DateTime    @default(now())
+
+  @@index([caseId, at])
+}
+
+// ---------- Glass bottles ----------
+
+/// Empty bottles a customer handed back on a day: one row per customer per PKT
+/// day, written by the rider app (through /api/rider/bottles) or by hand on the
+/// Bottles page. What the customer still holds is worked out, never stored:
+/// litres delivered since the shift went to bottles, less these, less write-offs.
+model BottleReturn {
+  id           String   @id @default(cuid())
+  /// pktNoonToUTC(day) — the canonical PKT day key.
+  date         DateTime
+  customerId   String
+  customer     Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  riderId      String?
+  rider        Rider?   @relation(fields: [riderId], references: [id])
+  routeId      String?
+  returned     Int
+  /// "rider" from the app, "web" from the Bottles page.
+  source       String   @default("web")
+  note         String?
+  enteredById  String?
+  enteredByName String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([customerId, date])
+  @@index([date])
+  @@index([riderId, date])
+}
+
+/// A correction to what a customer holds, made in the office: bottles written off
+/// as broken or lost (negative), or an opening count (positive). Never written by
+/// the rider app.
+model BottleAdjustment {
+  id            String   @id @default(cuid())
+  date          DateTime
+  customerId    String
+  customer      Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  /// Change to what the customer holds: −3 = three fewer bottles to collect.
+  bottles       Int
+  reason        String
+  enteredById   String?
+  enteredByName String?
+  createdAt     DateTime @default(now())
+
+  @@index([customerId, date])
+}
+
+/// Where a customer's location pin is, read once from Customer.locationUrl (short
+/// links resolved through Google's redirect). Looked up again only when the link
+/// changes. Used by the Riders live map.
+model CustomerPin {
+  customerId String   @id
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  sourceUrl  String
+  lat        Float?
+  lng        Float?
+  /// Why no coordinates could be read (e.g. a text address, a dead link).
+  error      String?
+  resolvedAt DateTime @default(now())
+}
+
+/// The last position a rider's phone broadcast (one row per rider), kept by the
+/// web server's listener (src/lib/rider-location-keeper.ts) so Riders live can
+/// show it the moment the page opens.
+model RiderLocation {
+  riderId   String   @id
+  rider     Rider    @relation(fields: [riderId], references: [id], onDelete: Cascade)
+  routeId   String?
+  shiftId   String?
+  lat       Float
+  lng       Float
+  accuracy  Float?
+  speed     Float?
+  bearing   Float?
+  /// When the phone took the fix.
+  at        DateTime
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+/// The path a rider took — a point whenever the phone has moved a little since
+/// the last one kept (rider-location-keeper). Riders live draws it as a line;
+/// the first point after a round starts marks where it started. Kept 30 days.
+model RiderTrackPoint {
+  id       BigInt   @id @default(autoincrement())
+  riderId  String
+  rider    Rider    @relation(fields: [riderId], references: [id], onDelete: Cascade)
+  routeId  String?
+  lat      Float
+  lng      Float
+  accuracy Float?
+  at       DateTime
+
+  @@index([riderId, at])
+  @@index([at])
+}

@@ -1,0 +1,32 @@
+# Staging overlay. Always used *on top of* docker-compose.yml, never alone:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.staging.yml <cmd>
+#
+# /opt/farm-stg/.env sets COMPOSE_FILE to that pair, so a bare `docker compose`
+# run from that directory already picks this up.
+#
+# Everything here exists to keep the staging stack from colliding with the
+# production stack on the same box: different published port, different image
+# tags, different container names. The compose *project* name already differs on
+# its own (it defaults to the directory name — `farm-stg` vs `farm`), which is
+# what keeps the networks and the wa_auth volume separate.
+#
+# Staging is 3006. 3000-3003 are pm2 apps, 3004 is farm production, and 3005 is
+# the seo-121ecommerce node app.
+
+services:
+  web:
+    image: farm-stg-web:latest
+    container_name: farm-stg-web
+    # `!override` matters: compose *appends* to a sequence when merging files, so
+    # without it staging would inherit 3004 as well and fight production for the
+    # bind.
+    ports: !override
+      - "127.0.0.1:3006:3000"
+
+  migrate:
+    image: farm-stg-migrate:latest
+
+  worker:
+    image: farm-stg-worker:latest
+    container_name: farm-stg-worker

@@ -1,0 +1,11 @@
+-- A role for whoever runs the consignment shops.
+--
+-- Purely additive: the value is only ADDED here and never used by this
+-- migration, so there is no "unsafe use of new enum value" problem. No existing
+-- user row is touched — nobody holds the new role until someone is given it on
+-- the Users page.
+--
+-- Same form already proven on this database by
+-- 20260820190000_oncall_status_and_weekly_schedule and
+-- 20260828090000_retail_only_pack_units.
+ALTER TYPE "Role" ADD VALUE IF NOT EXISTS 'RETAIL_MANAGER';

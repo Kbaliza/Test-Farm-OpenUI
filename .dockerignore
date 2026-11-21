@@ -1,0 +1,23 @@
+node_modules
+.next
+.git
+.github
+coverage
+test
+*.local
+
+# env — injected at runtime via env_file / compose, never baked into an image
+.env
+.env.*
+
+# whatsapp session state lives in a Docker volume, not the image
+.wwebjs_auth
+.wwebjs_cache
+
+# stray artefacts in the repo root
+*.html
+*.zip
+left.txt
+SAMPLE
+req.txt
+Dairy Dashboard.html
